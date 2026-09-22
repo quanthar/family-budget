@@ -1,0 +1,223 @@
+// ============================================
+// FAMILY BUDGET — Prisma Schema
+// Database: SQLite (local development)
+// ============================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// --- Authentication ---
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  householdMembers HouseholdMember[]
+  households       HouseholdUser[]
+}
+
+model HouseholdUser {
+  id          String   @id @default(cuid())
+  userId      String
+  householdId String
+  role        String   @default("owner") // owner | member
+  createdAt   DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, householdId])
+}
+
+// --- Core Domain ---
+
+model Household {
+  id        String   @id @default(cuid())
+  name      String   @default("Наша семья")
+  currency  String   @default("RUB")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users             HouseholdUser[]
+  members           HouseholdMember[]
+  categories        Category[]
+  transactions      Transaction[]
+  recurringRules    RecurringRule[]
+  budgetPeriods     BudgetPeriod[]
+  notifications     Notification[]
+  calendarEntries   ProductionCalendarEntry[]
+}
+
+model HouseholdMember {
+  id          String   @id @default(cuid())
+  householdId String
+  userId      String?  // Linked user account (optional)
+  name        String
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  household      Household       @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  user           User?           @relation(fields: [userId], references: [id])
+  salarySettings SalarySettings[]
+  transactions   Transaction[]   @relation("MemberTransactions")
+  transfers      Transaction[]   @relation("TransferTarget")
+}
+
+// --- Salary ---
+
+model SalarySettings {
+  id             String   @id @default(cuid())
+  memberId       String
+  monthlySalary  Float
+  salaryType     String   @default("net") // "gross" | "net"
+  payDates       String   // JSON: [10, 25]
+  payProportions String   // JSON: [0.6, 0.4]
+  transferRule   String   @default("previous_working_day") // "previous_working_day" | "next_working_day"
+  isActive       Boolean  @default(true)
+  effectiveFrom  DateTime @default(now())
+  effectiveTo    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  member HouseholdMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+}
+
+// --- Categories ---
+
+model Category {
+  id          String   @id @default(cuid())
+  householdId String
+  name        String
+  icon        String   @default("MoreHorizontal")
+  color       String   @default("#71717a")
+  order       Int      @default(0)
+  isDefault   Boolean  @default(false)
+  isArchived  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  household     Household       @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  transactions  Transaction[]
+  recurringRules RecurringRule[]
+}
+
+// --- Transactions ---
+
+model Transaction {
+  id              String    @id @default(cuid())
+  householdId     String
+  type            String    // "income" | "expense" | "transfer"
+  amount          Float
+  categoryId      String?
+  memberId        String?
+  targetMemberId  String?   // For transfers
+  date            DateTime
+  description     String    @default("")
+  incomeType      String?   // "salary" | "bonus" | "refund" | "freelance" | "gift" | "other"
+  recurringRuleId String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  household    Household        @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  category     Category?        @relation(fields: [categoryId], references: [id])
+  member       HouseholdMember? @relation("MemberTransactions", fields: [memberId], references: [id])
+  targetMember HouseholdMember? @relation("TransferTarget", fields: [targetMemberId], references: [id])
+  recurringRule RecurringRule?   @relation(fields: [recurringRuleId], references: [id])
+
+  @@index([householdId, date])
+  @@index([householdId, type])
+  @@index([memberId])
+}
+
+// --- Recurring Rules ---
+
+model RecurringRule {
+  id            String    @id @default(cuid())
+  householdId   String
+  name          String
+  type          String    // "income" | "expense"
+  amount        Float
+  categoryId    String
+  memberId      String?
+  owner         String    @default("shared") // "person1" | "person2" | "shared"
+  period        String    @default("monthly") // "monthly" | "quarterly" | "yearly"
+  dayOfMonth    Int
+  isActive      Boolean   @default(true)
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  household    Household     @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  category     Category      @relation(fields: [categoryId], references: [id])
+  transactions Transaction[]
+
+  @@index([householdId, isActive])
+}
+
+// --- Budget Periods ---
+
+model BudgetPeriod {
+  id           String    @id @default(cuid())
+  householdId  String
+  year         Int
+  month        Int       // 1-12
+  status       String    @default("planned") // "planned" | "active" | "closed"
+  snapshotData String?   // JSON snapshot when closed
+  createdAt    DateTime  @default(now())
+  closedAt     DateTime?
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  @@unique([householdId, year, month])
+}
+
+// --- Production Calendar ---
+
+model ProductionCalendarEntry {
+  id                    String   @id @default(cuid())
+  householdId           String
+  date                  DateTime
+  isWorking             Boolean
+  isHoliday             Boolean  @default(false)
+  holidayName           String?
+  isTransferredWorkday  Boolean  @default(false)
+  isTransferredWeekend  Boolean  @default(false)
+  year                  Int
+  month                 Int
+  createdAt             DateTime @default(now())
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  @@unique([householdId, date])
+  @@index([householdId, year, month])
+}
+
+// --- Notifications ---
+
+model Notification {
+  id          String   @id @default(cuid())
+  householdId String
+  title       String
+  message     String
+  type        String   @default("system") // "salary" | "payment" | "budget" | "system"
+  isRead      Boolean  @default(false)
+  actionUrl   String?
+  createdAt   DateTime @default(now())
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  @@index([householdId, isRead])
+}

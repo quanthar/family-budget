@@ -1,36 +1,85 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Семейный Бюджет (Family Budget) 💰
 
-## Getting Started
+Веб-приложение для прозрачного и комфортного ведения семейного бюджета двумя людьми с учетом двух зарплат, графиков авансов и официального производственного календаря РФ.
 
-First, run the development server:
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/quanthar/family-budget)
+
+---
+
+## 🚀 Удалённый запуск через GitHub Codespaces
+
+Приложение полностью готово к работе в облаке GitHub Codespaces — это позволяет пользоваться им с любого устройства (компьютер, планшет, смартфон) без необходимости локальной установки:
+
+1. Нажмите кнопку **[Open in GitHub Codespaces](https://codespaces.new/quanthar/family-budget)** выше (или создайте Codespace в репозитории).
+2. Среда автоматически выполнит установку (`npm install`), применит схему базы данных SQLite (`prisma db push`), наполнит её начальными данными (`prisma/seed.ts`) и запустит сервер разработки.
+3. Во вкладке **Ports** порт `3000` будет автоматически проброшен. Нажмите на иконку глобуса или перейдите по выданному HTTPS-адресу (`https://<имя-кодспейса>-3000.app.github.dev`).
+4. **Для доступа с телефона:** в списке портов нажмите правой кнопкой на порт `3000` -> **Port Visibility** -> установите **Public**. Теперь этой ссылкой можно пользоваться с телефона или поделиться со второй половинкой!
+
+> **Почему не GitHub Pages?**  
+> GitHub Pages предназначен исключительно для статических сайтов (только HTML/CSS/JS) и не поддерживает серверный рантайм (Node.js) и базу данных. Данное приложение является полнофункциональным Full-Stack приложением с API-маршрутами и базой данных SQLite (Prisma), поэтому для работы в облаке GitHub используется именно **GitHub Codespaces**.
+
+---
+
+## ✨ Ключевые возможности
+
+- 📊 **Главная панель (Dashboard)**:
+  - KPI-карточки (Остаток, Доходы, Расходы, Обязательные списания)
+  - Динамическая шкала прогноза баланса до конца месяца
+  - Хроника Cash Flow с ближайшими поступлениями и списаниями
+  - Распределение расходов по категориям и по участникам семьи
+  - Блок фактологических «умных подсказок» (до зарплаты N дней, статус обязательств)
+- 📝 **История операций (`/transactions`)**:
+  - Быстрый поиск и фильтрация по типу (все / расходы / доходы / переводы), категориям и участникам
+  - Группировка по датам и подсчет итогов
+  - Мгновенное удаление с защитой
+- 🎯 **План бюджета (`/plan`)**:
+  - Три столпа: Доходы vs Обязательные платежи vs Свободный остаток
+  - Прогресс-бар выполнения обязательств месяца
+  - Интерактивный чек-лист регулярных списаний (с кнопкой быстрой фиксации оплаты)
+- 📅 **Производственный и финансовый календарь (`/calendar`)**:
+  - Официальный календарь РФ на 2025–2027 годы (праздники, выходные, переносы)
+  - Автоматический расчет дат выплат по ст. 136 ТК РФ (перенос на предшествующий рабочий день)
+  - Инспектор событий любого выбранного дня
+- 📈 **Аналитика (`/analytics`)**:
+  - Интерактивные графики Recharts: динамика доходов/расходов за 6 месяцев
+  - Круговая диаграмма структуры категорий и норма сбережений
+- 👥 **Участники (`/people`)**:
+  - Настройки зарплат для каждого партнера (на руки / до вычета НДФЛ 13%)
+  - Индивидуальные даты выплат и пропорции аванса (например, 40% на 60%)
+- ⚙️ **Настройки и Экспорт (`/settings`)**:
+  - Управление списком категорий и цветовой палитрой
+  - Выгрузка всей истории в Excel (CSV с UTF-8 BOM) и JSON
+- ⚡ **Быстрое добавление (`+ Добавить`)**:
+  - Модальное окно для записи расхода, дохода, перевода или создания регулярного правила с мгновенным обновлением интерфейса
+
+---
+
+## 🛠 Технологический стек
+
+- **Фреймворк**: Next.js 16 (App Router) + React 19 + TypeScript
+- **Стилизация**: Tailwind CSS (Dark Mode, палитра Slate/Zinc, акцентный Indigo)
+- **База данных**: SQLite + Prisma 6 ORM
+- **Графика**: Recharts + Lucide Icons
+- **Утилиты**: Date-fns, Zod, clsx, bcryptjs
+
+---
+
+## 💻 Локальный запуск
 
 ```bash
+# Клонирование репозитория
+git clone https://github.com/quanthar/family-budget.git
+cd family-budget
+
+# Установка зависимостей
+npm install
+
+# Генерация Prisma-клиента и инициализация базы данных SQLite
+npx prisma db push
+npx tsx prisma/seed.ts
+
+# Запуск сервера разработки
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Откройте [http://localhost:3000](http://localhost:3000) в браузере.
