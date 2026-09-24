@@ -12,4 +12,4 @@ jobs:
     steps:
       - name: Ping Family Budget App
         run: |
-          curl -s -f https://family-budget-inmz.onrender.com/api/health || true
+          curl -s -f https://family-budget-app-bc5e.onrender.com/api/health || true
