@@ -3,6 +3,9 @@
 Веб-приложение для прозрачного и комфортного ведения семейного бюджета двумя людьми с учетом двух зарплат, графиков авансов и официального производственного календаря РФ.
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/quanthar/family-budget)
+[![Live Website](https://img.shields.io/badge/Live%20Website-Render%20Cloud-success?style=flat&logo=render)](https://family-budget-app-bc5e.onrender.com)
+
+🌐 **Живой сайт (доступен 24/7):** [https://family-budget-app-bc5e.onrender.com](https://family-budget-app-bc5e.onrender.com)
 
 ---
 
