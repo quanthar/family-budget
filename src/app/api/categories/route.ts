@@ -59,10 +59,7 @@ export async function PUT(request: Request) {
     }
 
     const updated = await prisma.category.update({
-      where: {
-        id,
-        householdId: household.id,
-      },
+      where: { id },
       data: {
         ...(name ? { name: name.trim() } : {}),
         ...(icon ? { icon } : {}),
@@ -90,10 +87,7 @@ export async function DELETE(request: Request) {
 
     // Soft delete / archive
     await prisma.category.update({
-      where: {
-        id,
-        householdId: household.id,
-      },
+      where: { id },
       data: {
         isArchived: true,
       },

@@ -12,6 +12,7 @@ interface ModalProps {
   children: React.ReactNode;
   size?: "sm" | "md" | "lg" | "xl";
   showClose?: boolean;
+  closeOnBackdropClick?: boolean;
   className?: string;
 }
 
@@ -30,9 +31,11 @@ export function Modal({
   children,
   size = "md",
   showClose = true,
+  closeOnBackdropClick = true,
   className,
 }: ModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const mouseDownTarget = useRef<EventTarget | null>(null);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -57,9 +60,18 @@ export function Modal({
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto"
+      onMouseDown={(e) => {
+        mouseDownTarget.current = e.target;
+      }}
       onClick={(e) => {
-        if (e.target === overlayRef.current) onClose();
+        if (
+          closeOnBackdropClick &&
+          e.target === overlayRef.current &&
+          mouseDownTarget.current === overlayRef.current
+        ) {
+          onClose();
+        }
       }}
       role="dialog"
       aria-modal="true"
@@ -73,10 +85,11 @@ export function Modal({
         className={cn(
           "relative w-full bg-bg-secondary border border-border-subtle",
           "rounded-[var(--radius-2xl)] shadow-dialog",
-          "animate-scale-in",
+          "animate-scale-in my-auto",
           sizeStyles[size],
           className
         )}
+        onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         {(title || showClose) && (
@@ -96,6 +109,7 @@ export function Modal({
             </div>
             {showClose && (
               <button
+                type="button"
                 onClick={onClose}
                 className="p-1.5 rounded-[var(--radius-md)] text-fg-muted hover:text-fg-secondary hover:bg-bg-hover transition-colors"
                 aria-label="Закрыть"

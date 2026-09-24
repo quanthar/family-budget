@@ -127,10 +127,7 @@ export async function PUT(request: Request) {
     }
 
     const updated = await prisma.transaction.update({
-      where: {
-        id,
-        householdId: household.id,
-      },
+      where: { id },
       data,
       include: {
         category: true,
@@ -158,10 +155,7 @@ export async function DELETE(request: Request) {
 
     // Soft delete
     await prisma.transaction.update({
-      where: {
-        id,
-        householdId: household.id,
-      },
+      where: { id },
       data: {
         deletedAt: new Date(),
       },

@@ -36,7 +36,7 @@ export async function PUT(request: Request) {
 
     if (name) {
       await prisma.householdMember.update({
-        where: { id, householdId: household.id },
+        where: { id },
         data: { name: name.trim() },
       });
     }

@@ -188,8 +188,8 @@ function EditMemberModal({
   const [name, setName] = useState(member.name);
   const [salary, setSalary] = useState(String(setting?.monthlySalary || "150000"));
   const [salaryType, setSalaryType] = useState(setting?.salaryType || "net");
-  const [advanceDay, setAdvanceDay] = useState(25);
-  const [salaryDay, setSalaryDay] = useState(10);
+  const [advanceDay, setAdvanceDay] = useState("25");
+  const [salaryDay, setSalaryDay] = useState("10");
   const [advancePct, setAdvancePct] = useState(40);
   const [loading, setLoading] = useState(false);
 
@@ -197,8 +197,8 @@ function EditMemberModal({
     if (setting?.payDates) {
       try {
         const dates = JSON.parse(setting.payDates);
-        setAdvanceDay(dates[0] || 25);
-        setSalaryDay(dates[1] || 10);
+        setAdvanceDay(dates[0] !== undefined ? String(dates[0]) : "25");
+        setSalaryDay(dates[1] !== undefined ? String(dates[1]) : "10");
       } catch {}
     }
     if (setting?.payProportions) {
@@ -211,7 +211,15 @@ function EditMemberModal({
 
   const handleSave = async () => {
     const numSalary = parseFloat(salary);
-    if (!name.trim() || isNaN(numSalary) || numSalary <= 0) return;
+    if (!name.trim() || isNaN(numSalary) || numSalary <= 0) {
+      toast.error("Укажите корректную сумму зарплаты");
+      return;
+    }
+
+    const adv = parseInt(advanceDay, 10);
+    const sal = parseInt(salaryDay, 10);
+    const validAdvance = isNaN(adv) ? 25 : Math.min(31, Math.max(1, adv));
+    const validSalary = isNaN(sal) ? 10 : Math.min(31, Math.max(1, sal));
 
     setLoading(true);
     try {
@@ -224,7 +232,7 @@ function EditMemberModal({
           salarySettings: {
             monthlySalary: numSalary,
             salaryType,
-            payDates: [advanceDay, salaryDay],
+            payDates: [validAdvance, validSalary],
             payProportions: [advancePct / 100, (100 - advancePct) / 100],
             transferRule: "previous_working_day",
           },
@@ -243,7 +251,13 @@ function EditMemberModal({
   };
 
   return (
-    <Modal isOpen onClose={onClose} title={`Настройки: ${member.name}`} size="md">
+    <Modal
+      isOpen
+      onClose={onClose}
+      title={`Настройки: ${member.name}`}
+      size="md"
+      closeOnBackdropClick={false}
+    >
       <div className="space-y-4">
         <div>
           <label className="text-xs text-fg-tertiary uppercase tracking-wider block mb-1.5">
@@ -253,7 +267,7 @@ function EditMemberModal({
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="w-full h-10 px-3 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)]"
+            className="w-full h-10 px-3 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)] focus:outline-none focus:border-accent"
           />
         </div>
 
@@ -265,9 +279,10 @@ function EditMemberModal({
             <input
               type="text"
               inputMode="numeric"
+              placeholder="0"
               value={salary}
               onChange={(e) => setSalary(e.target.value.replace(/[^\d]/g, ""))}
-              className="w-full h-10 px-3 pr-8 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)] font-medium tabular-nums"
+              className="w-full h-10 px-3 pr-8 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)] font-medium tabular-nums focus:outline-none focus:border-accent"
             />
             <span className="absolute right-3 top-2.5 text-sm text-fg-muted">₽</span>
           </div>
@@ -306,12 +321,13 @@ function EditMemberModal({
               День аванса (число)
             </label>
             <input
-              type="number"
-              min={1}
-              max={31}
+              type="text"
+              inputMode="numeric"
+              maxLength={2}
+              placeholder="25"
               value={advanceDay}
-              onChange={(e) => setAdvanceDay(parseInt(e.target.value) || 25)}
-              className="w-full h-10 px-3 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)]"
+              onChange={(e) => setAdvanceDay(e.target.value.replace(/[^\d]/g, ""))}
+              className="w-full h-10 px-3 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)] font-medium tabular-nums focus:outline-none focus:border-accent"
             />
           </div>
 
@@ -320,12 +336,13 @@ function EditMemberModal({
               День зарплаты (число)
             </label>
             <input
-              type="number"
-              min={1}
-              max={31}
+              type="text"
+              inputMode="numeric"
+              maxLength={2}
+              placeholder="10"
               value={salaryDay}
-              onChange={(e) => setSalaryDay(parseInt(e.target.value) || 10)}
-              className="w-full h-10 px-3 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)]"
+              onChange={(e) => setSalaryDay(e.target.value.replace(/[^\d]/g, ""))}
+              className="w-full h-10 px-3 text-sm bg-bg-surface text-fg-primary border border-border-default rounded-[var(--radius-lg)] font-medium tabular-nums focus:outline-none focus:border-accent"
             />
           </div>
         </div>
@@ -345,15 +362,25 @@ function EditMemberModal({
           />
         </div>
 
-        <Button
-          fullWidth
-          size="lg"
-          disabled={!name.trim() || !salary || loading}
-          onClick={handleSave}
-        >
-          {loading ? <Loader2 className="animate-spin mr-2" size={16} /> : null}
-          Сохранить изменения
-        </Button>
+        <div className="flex gap-2.5 pt-2">
+          <Button
+            type="button"
+            variant="secondary"
+            className="flex-1"
+            onClick={onClose}
+          >
+            Отмена
+          </Button>
+          <Button
+            type="button"
+            className="flex-1"
+            disabled={!name.trim() || !salary || loading}
+            onClick={handleSave}
+          >
+            {loading ? <Loader2 className="animate-spin mr-2" size={16} /> : null}
+            Сохранить изменения
+          </Button>
+        </div>
       </div>
     </Modal>
   );

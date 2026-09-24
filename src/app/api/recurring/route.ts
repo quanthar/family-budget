@@ -76,10 +76,7 @@ export async function PUT(request: Request) {
     }
 
     const updated = await prisma.recurringRule.update({
-      where: {
-        id,
-        householdId: household.id,
-      },
+      where: { id },
       data,
       include: {
         category: true,
@@ -104,10 +101,7 @@ export async function DELETE(request: Request) {
     }
 
     await prisma.recurringRule.delete({
-      where: {
-        id,
-        householdId: household.id,
-      },
+      where: { id },
     });
 
     return NextResponse.json({ success: true });
