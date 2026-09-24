@@ -1,0 +1,15 @@
+name: Keep Render Alive (0s Cold Start)
+
+on:
+  schedule:
+    # Runs every 10 minutes to prevent Render from going to sleep
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Family Budget App
+        run: |
+          curl -s -f https://family-budget-inmz.onrender.com/api/health || true
