@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: family-budget
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install && npx prisma db push && npx tsx prisma/seed.ts && npm run build
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        value: file:./dev.db
+      - key: NEXTAUTH_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
