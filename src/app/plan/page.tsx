@@ -17,8 +17,11 @@ import {
   ArrowUpRight,
   ShieldCheck,
   Wallet,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import { QuickAddModal } from "@/components/modals/quick-add-modal";
+import { EditRecurringModal, type EditableRecurringRule } from "@/components/modals/edit-recurring-modal";
 
 interface PlanData {
   summary: {
@@ -46,6 +49,7 @@ export default function PlanPage() {
   const [data, setData] = useState<PlanData | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [editingRule, setEditingRule] = useState<EditableRecurringRule | null>(null);
 
   const fetchPlan = useCallback(() => {
     fetch("/api/dashboard")
@@ -63,6 +67,19 @@ export default function PlanPage() {
     window.addEventListener("budget:reload", handleReload);
     return () => window.removeEventListener("budget:reload", handleReload);
   }, [fetchPlan]);
+
+  const handleDeleteRule = async (ruleId: string, name: string) => {
+    if (!confirm(`Удалить регулярный платёж "${name}"?`)) return;
+    try {
+      const res = await fetch(`/api/recurring?id=${ruleId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+      toast.success("Регулярный платёж удален");
+      fetchPlan();
+      window.dispatchEvent(new CustomEvent("budget:reload"));
+    } catch {
+      toast.error("Не удалось удалить платёж");
+    }
+  };
 
   const handleMarkAsPaid = async (rule: PlanData["recurringInstances"][0]) => {
     try {
@@ -201,7 +218,7 @@ export default function PlanPage() {
               return (
                 <div
                   key={rule.ruleId}
-                  className="flex items-center justify-between py-3 px-1 hover:bg-bg-hover/30 transition-colors"
+                  className="flex items-center justify-between py-3 px-1 hover:bg-bg-hover/30 transition-colors group"
                 >
                   <div className="flex items-center gap-3">
                     <div
@@ -234,7 +251,7 @@ export default function PlanPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
                     <AmountDisplay
                       amount={rule.amount}
                       size="sm"
@@ -246,11 +263,30 @@ export default function PlanPage() {
                         size="sm"
                         variant="secondary"
                         onClick={() => handleMarkAsPaid(rule)}
-                        className="text-xs"
+                        className="text-xs h-8 px-2.5"
                       >
                         Оплатить
                       </Button>
                     )}
+
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        type="button"
+                        onClick={() => setEditingRule(rule)}
+                        title="Редактировать платёж"
+                        className="p-1.5 text-fg-muted hover:text-accent-text hover:bg-accent-muted rounded-[var(--radius-md)] transition-colors"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteRule(rule.ruleId, rule.name)}
+                        title="Удалить платёж"
+                        className="p-1.5 text-fg-muted hover:text-expense-text hover:bg-expense-muted rounded-[var(--radius-md)] transition-colors"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -263,6 +299,14 @@ export default function PlanPage() {
         isOpen={isAddOpen}
         onClose={() => setIsAddOpen(false)}
         onSuccess={fetchPlan}
+      />
+
+      <EditRecurringModal
+        isOpen={Boolean(editingRule)}
+        onClose={() => setEditingRule(null)}
+        rule={editingRule}
+        onSuccess={fetchPlan}
+        onDelete={(id) => handleDeleteRule(id, editingRule?.name || "")}
       />
     </AppLayout>
   );

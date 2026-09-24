@@ -19,8 +19,10 @@ import {
   Filter,
   Plus,
   Calendar,
+  Pencil,
 } from "lucide-react";
 import { QuickAddModal } from "@/components/modals/quick-add-modal";
+import { EditTransactionModal, type EditableTransaction } from "@/components/modals/edit-transaction-modal";
 
 interface Transaction {
   id: string;
@@ -50,6 +52,7 @@ export default function TransactionsPage() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [editingTx, setEditingTx] = useState<EditableTransaction | null>(null);
 
   const fetchTransactions = useCallback(() => {
     fetch("/api/transactions")
@@ -278,20 +281,32 @@ export default function TransactionsPage() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-3 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0">
                           <AmountDisplay
                             amount={tx.type === "expense" ? -tx.amount : tx.amount}
                             size="md"
                             colorize
                             showSign
                           />
-                          <button
-                            onClick={() => handleDelete(tx.id, tx.description, tx.amount)}
-                            title="Удалить операцию"
-                            className="opacity-0 group-hover:opacity-100 p-1.5 text-fg-muted hover:text-expense-text hover:bg-expense-muted rounded-[var(--radius-md)] transition-all"
-                          >
-                            <Trash2 size={15} />
-                          </button>
+
+                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              type="button"
+                              onClick={() => setEditingTx(tx)}
+                              title="Редактировать операцию"
+                              className="p-1.5 text-fg-muted hover:text-accent-text hover:bg-accent-muted rounded-[var(--radius-md)] transition-colors"
+                            >
+                              <Pencil size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(tx.id, tx.description, tx.amount)}
+                              title="Удалить операцию"
+                              className="p-1.5 text-fg-muted hover:text-expense-text hover:bg-expense-muted rounded-[var(--radius-md)] transition-colors"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -306,6 +321,13 @@ export default function TransactionsPage() {
       <QuickAddModal
         isOpen={isAddOpen}
         onClose={() => setIsAddOpen(false)}
+        onSuccess={fetchTransactions}
+      />
+
+      <EditTransactionModal
+        isOpen={Boolean(editingTx)}
+        onClose={() => setEditingTx(null)}
+        transaction={editingTx}
         onSuccess={fetchTransactions}
       />
     </AppLayout>

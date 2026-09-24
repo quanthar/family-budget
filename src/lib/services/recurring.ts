@@ -27,6 +27,7 @@ export interface RecurringInstance {
   amount: number;
   type: "income" | "expense";
   date: Date;
+  dayOfMonth?: number;
   categoryId: string;
   categoryName?: string;
   categoryColor?: string;
@@ -104,6 +105,7 @@ export class RecurringService {
         amount: rule.amount,
         type: rule.type,
         date,
+        dayOfMonth: rule.dayOfMonth,
         categoryId: rule.categoryId,
         categoryName: rule.categoryName,
         categoryColor: rule.categoryColor,
