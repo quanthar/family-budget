@@ -2,8 +2,7 @@ name: Keep Render Alive (0s Cold Start)
 
 on:
   schedule:
-    # Runs every 10 minutes to prevent Render from going to sleep
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:

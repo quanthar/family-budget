@@ -22,6 +22,12 @@ const DEFAULT_CATEGORIES = [
 ];
 
 async function main() {
+  const existingCount = await prisma.household.count();
+  if (existingCount > 0) {
+    console.log("Database already initialized, skipping seed.");
+    return;
+  }
+
   console.log("Seeding database...");
 
   // Create demo user
