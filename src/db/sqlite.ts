@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import type {
   DrawAssignment,
   Exclusion,
@@ -74,9 +74,20 @@ function mapParticipant(row: ParticipantRow): Participant {
 
 export class SqliteStore implements SantaStore {
   readonly kind = 'sqlite' as const;
-  private db!: Database.Database;
+  private db!: DatabaseSync;
 
   constructor(private readonly dbPath: string) {}
+
+  private runInTx(fn: () => void): void {
+    this.db.exec('BEGIN');
+    try {
+      fn();
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
 
   async init(defaultInviteCode: string): Promise<void> {
     if (this.dbPath !== ':memory:') {
@@ -84,9 +95,11 @@ export class SqliteStore implements SantaStore {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    this.db = new Database(this.dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
+    this.db = new DatabaseSync(this.dbPath);
+    if (this.dbPath !== ':memory:') {
+      this.db.exec('PRAGMA journal_mode = WAL;');
+    }
+    this.db.exec('PRAGMA foreign_keys = ON;');
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS santa_games (
@@ -132,7 +145,7 @@ export class SqliteStore implements SantaStore {
 
     const cols = this.db
       .prepare('PRAGMA table_info(santa_games)')
-      .all() as Array<{ name: string }>;
+      .all() as unknown as Array<{ name: string }>;
     const colNames = new Set(cols.map((c) => c.name));
     if (!colNames.has('admin_telegram_id')) {
       this.db.exec('ALTER TABLE santa_games ADD COLUMN admin_telegram_id TEXT');
@@ -202,7 +215,7 @@ export class SqliteStore implements SantaStore {
   async listParticipants(): Promise<Participant[]> {
     const rows = this.db
       .prepare('SELECT * FROM santa_participants ORDER BY id ASC')
-      .all() as ParticipantRow[];
+      .all() as unknown as ParticipantRow[];
     return rows.map(mapParticipant);
   }
 
@@ -304,7 +317,7 @@ export class SqliteStore implements SantaStore {
   }
 
   async removeParticipant(participantId: number): Promise<void> {
-    const tx = this.db.transaction(() => {
+    this.runInTx(() => {
       this.db
         .prepare(
           'UPDATE santa_participants SET recipient_id = NULL WHERE recipient_id = ?',
@@ -314,13 +327,14 @@ export class SqliteStore implements SantaStore {
         .prepare('DELETE FROM santa_participants WHERE id = ?')
         .run(participantId);
     });
-    tx();
   }
 
   async listExclusions(): Promise<Exclusion[]> {
     const rows = this.db
-      .prepare('SELECT id, giver_id, receiver_id FROM santa_exclusions ORDER BY id ASC')
-      .all() as ExclusionRow[];
+      .prepare(
+        'SELECT id, giver_id, receiver_id FROM santa_exclusions ORDER BY id ASC',
+      )
+      .all() as unknown as ExclusionRow[];
     return rows.map((r) => ({
       id: r.id,
       giverId: r.giver_id,
@@ -337,13 +351,12 @@ export class SqliteStore implements SantaStore {
     const stmt = this.db.prepare(
       'INSERT OR IGNORE INTO santa_exclusions (giver_id, receiver_id) VALUES (?, ?)',
     );
-    const tx = this.db.transaction(() => {
+    this.runInTx(() => {
       stmt.run(giverId, receiverId);
       if (mutual) {
         stmt.run(receiverId, giverId);
       }
     });
-    tx();
   }
 
   async removeExclusion(exclusionId: number): Promise<void> {
@@ -357,7 +370,7 @@ export class SqliteStore implements SantaStore {
     const updateParticipant = this.db.prepare(
       'UPDATE santa_participants SET recipient_id = ?, gift_ready = 0, updated_at = ? WHERE id = ?',
     );
-    const tx = this.db.transaction(() => {
+    this.runInTx(() => {
       for (const a of assignments) {
         updateParticipant.run(a.receiverId, now, a.giverId);
       }
@@ -367,13 +380,12 @@ export class SqliteStore implements SantaStore {
         )
         .run(now);
     });
-    tx();
     return this.getGame();
   }
 
   async resetDraw(): Promise<GameSettings> {
     const now = new Date().toISOString();
-    const tx = this.db.transaction(() => {
+    this.runInTx(() => {
       this.db
         .prepare(
           'UPDATE santa_participants SET recipient_id = NULL, gift_ready = 0, updated_at = ?',
@@ -385,7 +397,6 @@ export class SqliteStore implements SantaStore {
         )
         .run();
     });
-    tx();
     return this.getGame();
   }
 

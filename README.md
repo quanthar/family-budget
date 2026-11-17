@@ -12,7 +12,7 @@
 - **Двойной режим работы:**
   - Локально / без `WEBHOOK_URL` — **Long Polling** + локальная **SQLite** (`./data/santa.db`).
   - На Render (`RENDER_EXTERNAL_URL` или `WEBHOOK_URL`) — **Webhook** + `/health` и `/api/health`.
-  - Если в `DATABASE_URL` указан `postgresql://...`, бот автоматически использует PostgreSQL (создаёт таблицы `santa_*`). Иначе использует локальный файл SQLite.
+  - Если в `DATABASE_URL` указан `postgresql://...`, бот автоматически использует **PostgreSQL** в отдельной схеме `secret_santa` (`secret_santa.santa_*`), поэтому он не мешает другим проектам в той же БД. Позже все данные бота можно удалить одной командой `DROP SCHEMA secret_santa CASCADE;`. Иначе используется локальный файл SQLite.
 
 ## Настройка на Render (после пуша)
 1. В панели Render для этого сервиса добавьте переменные окружения:
