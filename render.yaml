@@ -1,15 +1,18 @@
 services:
   - type: web
-    name: family-budget
+    name: secret-santa-bot
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: npm install && npx prisma db push && npm run build
+    buildCommand: npm install && npm run build
     startCommand: npm start
+    healthCheckPath: /health
     envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_TELEGRAM_ID
+        sync: false
       - key: DATABASE_URL
         sync: false
-      - key: NEXTAUTH_SECRET
-        generateValue: true
       - key: NODE_ENV
         value: production

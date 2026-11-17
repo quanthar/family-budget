@@ -9,6 +9,6 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Family Budget App
+      - name: Ping Secret Santa Bot
         run: |
           curl -s -f https://family-budget-app-bc5e.onrender.com/api/health || true
