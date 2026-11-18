@@ -40,8 +40,8 @@ export function formatMyProfileBlock(p: Participant): string {
   return [
     '<b>Твоя анкета:</b>',
     `👤 Имя: <b>${escapeHtml(p.displayName)}</b>`,
-    `🎁 Вишлист: ${wishlist}`,
-    `🚫 Что не дарить / доставка: ${anti}`,
+    `🎁 Вишлист:\n${wishlist}`,
+    `🚫 Что не дарить / доставка:\n${anti}`,
   ].join('\n');
 }
 

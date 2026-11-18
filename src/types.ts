@@ -10,10 +10,12 @@ export interface GameSettings {
   drawnAt: string | null;
   adminTelegramId: string | null;
   adminClaimCode: string | null;
+  createdAt: string;
 }
 
 export interface Participant {
   id: number;
+  gameId: number;
   telegramId: string;
   username: string | null;
   displayName: string;
@@ -27,6 +29,7 @@ export interface Participant {
 
 export interface Exclusion {
   id: number;
+  gameId: number;
   giverId: number;
   receiverId: number;
 }
@@ -38,11 +41,17 @@ export interface DrawAssignment {
 
 export type SessionState =
   | { type: 'idle' }
-  | { type: 'edit_name' }
-  | { type: 'edit_wishlist' }
-  | { type: 'edit_antiwishlist' }
-  | { type: 'msg_to_recipient' }
-  | { type: 'msg_to_santa' }
-  | { type: 'admin_edit_title' }
-  | { type: 'admin_edit_budget' }
-  | { type: 'admin_edit_date' };
+  | { type: 'create_game_title' }
+  | { type: 'edit_name'; gameId: number }
+  | { type: 'edit_wishlist'; gameId: number; append?: boolean }
+  | { type: 'edit_antiwishlist'; gameId: number }
+  | { type: 'msg_to_recipient'; gameId: number }
+  | { type: 'msg_to_santa'; gameId: number }
+  | { type: 'admin_edit_title'; gameId: number }
+  | { type: 'admin_edit_budget'; gameId: number }
+  | { type: 'admin_edit_date'; gameId: number };
+
+export interface UserSession {
+  activeGameId: number | null;
+  state: SessionState;
+}

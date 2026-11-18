@@ -1,19 +1,33 @@
 import { InlineKeyboard } from 'grammy';
-import type { GameStatus, Participant } from '../types.js';
+import type { GameSettings, GameStatus, Participant } from '../types.js';
 import type { GroupedExclusion } from './formatters.js';
 
 export function buildCancelKeyboard(backCallback = 'menu:home'): InlineKeyboard {
   return new InlineKeyboard().text('❌ Отмена', backCallback);
 }
 
-export function buildHomeKeyboard(
-  status: GameStatus,
-  isAdmin: boolean,
-  giftReady: boolean,
+export function buildWishlistPromptKeyboard(
+  hasExistingWishlist: boolean,
+  backCallback = 'menu:home',
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
+  if (hasExistingWishlist) {
+    kb.text('➕ Дописать в конец (не удаляя старое)', 'profile:wishlist_append').row();
+  }
+  kb.text('❌ Отмена', backCallback);
+  return kb;
+}
 
-  if (status === 'registration') {
+export function buildHomeKeyboard(opts: {
+  status: GameStatus;
+  isAdmin: boolean;
+  giftReady: boolean;
+  gamesCount: number;
+  canCreateGame: boolean;
+}): InlineKeyboard {
+  const kb = new InlineKeyboard();
+
+  if (opts.status === 'registration') {
     kb.text('✏️ Изменить имя', 'profile:name')
       .text('🎁 Вишлист', 'profile:wishlist')
       .row()
@@ -27,7 +41,9 @@ export function buildHomeKeyboard(
       .text('🎅 Написать моему Санте', 'chat:to_santa')
       .row()
       .text(
-        giftReady ? '↩️ Снять отметку «подарок готов»' : '✅ Подарок готов / отправлен',
+        opts.giftReady
+          ? '↩️ Снять отметку «подарок готов»'
+          : '✅ Подарок готов / отправлен',
         'gift:toggle',
       )
       .row()
@@ -35,10 +51,41 @@ export function buildHomeKeyboard(
       .text('🔄 Обновить', 'menu:home');
   }
 
-  if (isAdmin) {
+  if (opts.isAdmin) {
     kb.row().text('⚙️ Админ-панель', 'admin:home');
   }
 
+  if (opts.gamesCount > 1 || opts.canCreateGame) {
+    kb.row();
+    if (opts.gamesCount > 1) {
+      kb.text(`🔀 Мои игры (${opts.gamesCount})`, 'games:list');
+    }
+    if (opts.canCreateGame) {
+      kb.text('➕ Создать свою игру', 'games:create');
+    }
+  }
+
+  return kb;
+}
+
+export function buildGamesListKeyboard(opts: {
+  games: GameSettings[];
+  activeGameId: number | null;
+  isAdminOf: (game: GameSettings) => boolean;
+  canCreateGame: boolean;
+}): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const g of opts.games) {
+    const marker = g.id === opts.activeGameId ? '✅ ' : '';
+    const role = opts.isAdminOf(g) ? ' 👑' : '';
+    kb.text(`${marker}${g.title}${role}`, `games:select:${g.id}`).row();
+  }
+  if (opts.canCreateGame) {
+    kb.text('➕ Создать свою игру', 'games:create').row();
+  }
+  if (opts.games.length > 0) {
+    kb.text('⬅️ В активную игру', 'menu:home');
+  }
   return kb;
 }
 
@@ -52,10 +99,13 @@ export function buildProfileViewKeyboard(): InlineKeyboard {
     .text('⬅️ В главное меню', 'menu:home');
 }
 
-export function buildAdminKeyboard(
-  status: GameStatus,
-  adminIsParticipant: boolean,
-): InlineKeyboard {
+export function buildAdminKeyboard(opts: {
+  status: GameStatus;
+  adminIsParticipant: boolean;
+  isSuperAdmin: boolean;
+  gamesCount: number;
+  canCreateGame: boolean;
+}): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text('🔗 Инвайт-ссылка', 'admin:invite')
     .text('📝 Настройки игры', 'admin:settings')
@@ -64,7 +114,7 @@ export function buildAdminKeyboard(
     .text('🚫 Пары-исключения', 'admin:exclusions')
     .row();
 
-  if (status === 'registration') {
+  if (opts.status === 'registration') {
     kb.text('🎲 Провести жеребьёвку', 'admin:draw_confirm').row();
   } else {
     kb.text('🔄 Сбросить жеребьёвку (удалить пары)', 'admin:reset_confirm').row();
@@ -72,10 +122,23 @@ export function buildAdminKeyboard(
 
   kb.text('📢 Напомнить участникам', 'admin:nudge').row();
 
-  if (!adminIsParticipant) {
+  if (opts.isSuperAdmin) {
+    kb.text('🎫 Ссылка для создания игры (друзьям)', 'admin:host_invite').row();
+  }
+
+  if (!opts.adminIsParticipant) {
     kb.text('🎄 Присоединиться к игре', 'admin:join_self').row();
   } else {
-    kb.text('🏠 В меню участника', 'menu:home');
+    kb.text('🏠 В меню участника', 'menu:home').row();
+  }
+
+  if (opts.gamesCount > 1 || opts.canCreateGame) {
+    if (opts.gamesCount > 1) {
+      kb.text(`🔀 Мои игры (${opts.gamesCount})`, 'games:list');
+    }
+    if (opts.canCreateGame) {
+      kb.text('➕ Создать игру', 'games:create');
+    }
   }
 
   return kb;
@@ -84,6 +147,13 @@ export function buildAdminKeyboard(
 export function buildAdminInviteKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('🔄 Сменить код ссылки', 'admin:invite:regen')
+    .row()
+    .text('⬅️ Назад в админку', 'admin:home');
+}
+
+export function buildAdminHostInviteKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('🔄 Сменить ссылку-пропуск', 'admin:host_invite:regen')
     .row()
     .text('⬅️ Назад в админку', 'admin:home');
 }

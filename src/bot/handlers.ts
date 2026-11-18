@@ -17,6 +17,7 @@ import {
 import {
   buildAdminDeleteParticipantConfirmKeyboard,
   buildAdminExclusionsKeyboard,
+  buildAdminHostInviteKeyboard,
   buildAdminInviteKeyboard,
   buildAdminKeyboard,
   buildAdminParticipantsKeyboard,
@@ -24,11 +25,13 @@ import {
   buildCancelKeyboard,
   buildConfirmDrawKeyboard,
   buildConfirmResetKeyboard,
+  buildGamesListKeyboard,
   buildHomeKeyboard,
   buildPickExclusionDirectionKeyboard,
   buildPickGiverKeyboard,
   buildPickReceiverKeyboard,
   buildProfileViewKeyboard,
+  buildWishlistPromptKeyboard,
 } from './keyboards.js';
 
 interface Deps {
@@ -36,6 +39,19 @@ interface Deps {
   store: SantaStore;
   config: AppConfig;
 }
+
+interface AuthContext {
+  telegramId: string;
+  userGames: GameSettings[];
+  activeGame: GameSettings;
+  me: Participant | null;
+  isAdmin: boolean;
+  isSuperAdmin: boolean;
+  canCreateGame: boolean;
+}
+
+const MAX_GAMES_REGULAR = 3;
+const MAX_GAMES_SUPERADMIN = 10;
 
 function getTelegramId(ctx: Context): string | null {
   return ctx.from ? String(ctx.from.id) : null;
@@ -50,14 +66,25 @@ function defaultDisplayName(ctx: Context): string {
   return `Участник ${ctx.from?.id ?? ''}`.trim();
 }
 
-function isAdminUser(
+function isGameAdmin(
   config: AppConfig,
   game: GameSettings,
   telegramId: string,
 ): boolean {
   return (
+    game.adminTelegramId === telegramId ||
+    (game.id === 1 && config.adminTelegramIds.has(telegramId))
+  );
+}
+
+function isSuperAdminUser(
+  config: AppConfig,
+  game1: GameSettings | null,
+  telegramId: string,
+): boolean {
+  return (
     config.adminTelegramIds.has(telegramId) ||
-    game.adminTelegramId === telegramId
+    game1?.adminTelegramId === telegramId
   );
 }
 
@@ -81,7 +108,6 @@ async function safeEditOrSend(
       ) {
         return;
       }
-      // Fall through to reply if editing is impossible
     }
   }
 
@@ -106,64 +132,43 @@ async function safeAnswerCallback(
 }
 
 export function registerHandlers({ bot, store, config }: Deps): void {
-  async function renderHome(ctx: Context, telegramId: string): Promise<void> {
-    await store.setSession(telegramId, { type: 'idle' });
-    const [game, me] = await Promise.all([
-      store.getGame(),
-      store.getParticipantByTelegramId(telegramId),
-    ]);
-    const isAdmin = isAdminUser(config, game, telegramId);
+  async function checkCreateEligibility(telegramId: string): Promise<{
+    eligible: boolean;
+    limitReached: boolean;
+    isSuper: boolean;
+  }> {
+    const game1 = await store.getGame(1);
+    const isSuper = isSuperAdminUser(config, game1, telegramId);
+    const hostedCount = await store.countHostedGames(telegramId);
 
-    if (!me) {
-      if (isAdmin) {
-        await renderAdminHome(ctx, telegramId);
-        return;
-      }
-      await ctx.reply(
-        '🔒 Это закрытый бот «Тайный Санта» для своей компании.\nЧтобы попасть в игру, перейди по пригласительной ссылке от организатора.',
-      );
-      return;
+    if (isSuper) {
+      return {
+        eligible: true,
+        limitReached: hostedCount >= MAX_GAMES_SUPERADMIN,
+        isSuper: true,
+      };
     }
 
-    const participants = await store.listParticipants();
-    const wishlistCount = participants.filter((p) => Boolean(p.wishlist)).length;
-    const recipient =
-      game.status === 'drawn' && me.recipientId
-        ? await store.getParticipantById(me.recipientId)
-        : null;
-
-    const text = formatHomeMessage(
-      game,
-      me,
-      recipient,
-      participants.length,
-      wishlistCount,
-    );
-    const kb = buildHomeKeyboard(game.status, isAdmin, me.giftReady);
-    await safeEditOrSend(ctx, text, kb);
-  }
-
-  async function renderAdminHome(
-    ctx: Context,
-    telegramId: string,
-  ): Promise<void> {
-    await store.setSession(telegramId, { type: 'idle' });
-    const [game, participants, exclusions, me] = await Promise.all([
-      store.getGame(),
-      store.listParticipants(),
-      store.listExclusions(),
-      store.getParticipantByTelegramId(telegramId),
+    const [inMainGame, hasHostPass] = await Promise.all([
+      store.isParticipantInGame(1, telegramId),
+      store.isHostAllowed(telegramId),
     ]);
 
-    const grouped = groupExclusions(exclusions, participants);
-    const text = formatAdminDashboard(game, participants, grouped.length);
-    const kb = buildAdminKeyboard(game.status, Boolean(me));
-    await safeEditOrSend(ctx, text, kb);
+    if (!inMainGame && !hasHostPass) {
+      return { eligible: false, limitReached: false, isSuper: false };
+    }
+
+    return {
+      eligible: true,
+      limitReached: hostedCount >= MAX_GAMES_REGULAR,
+      isSuper: false,
+    };
   }
 
-  async function requireParticipantOrAdmin(
+  async function resolveAuth(
     ctx: Context,
-  ): Promise<{ telegramId: string; isAdmin: boolean; me: Participant | null } | null> {
+    explicitGameId?: number,
+  ): Promise<AuthContext | null> {
     if (ctx.chat?.type !== 'private') {
       if (ctx.message?.text?.startsWith('/')) {
         await ctx.reply(
@@ -176,27 +181,184 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     const telegramId = getTelegramId(ctx);
     if (!telegramId) return null;
 
-    const [game, me] = await Promise.all([
-      store.getGame(),
-      store.getParticipantByTelegramId(telegramId),
+    const [userGames, session, game1, createCheck] = await Promise.all([
+      store.listGamesForUser(telegramId),
+      store.getSession(telegramId),
+      store.getGame(1),
+      checkCreateEligibility(telegramId),
     ]);
-    const isAdmin = isAdminUser(config, game, telegramId);
 
-    if (!me && !isAdmin) {
-      await safeAnswerCallback(
-        ctx,
-        'Доступ только по инвайт-ссылке от организатора.',
-        true,
-      );
-      if (!ctx.callbackQuery) {
-        await ctx.reply(
-          '🔒 Это закрытый бот «Тайный Санта» для своей компании.\nЧтобы попасть в игру, перейди по пригласительной ссылке от организатора.',
-        );
-      }
+    const isSuper = createCheck.isSuper;
+
+    // If super-admin hasn't created/joined any game yet, game 1 is still theirs
+    const effectiveGames =
+      userGames.length === 0 && isSuper && game1 ? [game1] : userGames;
+
+    if (effectiveGames.length === 0) {
       return null;
     }
 
-    return { telegramId, isAdmin, me };
+    const targetGame =
+      (explicitGameId !== undefined
+        ? effectiveGames.find((g) => g.id === explicitGameId)
+        : undefined) ??
+      (session.activeGameId !== null
+        ? effectiveGames.find((g) => g.id === session.activeGameId)
+        : undefined) ??
+      effectiveGames[0];
+
+    if (!targetGame) {
+      return null;
+    }
+
+    const me = await store.getParticipantByTelegramId(targetGame.id, telegramId);
+    const isAdmin = isGameAdmin(config, targetGame, telegramId);
+
+    return {
+      telegramId,
+      userGames: effectiveGames,
+      activeGame: targetGame,
+      me,
+      isAdmin,
+      isSuperAdmin: isSuper,
+      canCreateGame: createCheck.eligible && !createCheck.limitReached,
+    };
+  }
+
+  async function denyUnauthorized(ctx: Context): Promise<void> {
+    await safeAnswerCallback(
+      ctx,
+      'Доступ только по пригласительной ссылке от организатора.',
+      true,
+    );
+    if (!ctx.callbackQuery) {
+      await ctx.reply(
+        '🔒 Это закрытый бот «Тайный Санта» для своей компании.\nЧтобы попасть в игру, перейди по пригласительной ссылке от организатора.',
+      );
+    }
+  }
+
+  async function renderHome(
+    ctx: Context,
+    telegramId: string,
+    explicitGameId?: number,
+  ): Promise<void> {
+    const auth = await resolveAuth(ctx, explicitGameId);
+    if (!auth) {
+      await denyUnauthorized(ctx);
+      return;
+    }
+
+    await store.setActiveGame(telegramId, auth.activeGame.id);
+
+    if (!auth.me) {
+      if (auth.isAdmin) {
+        await renderAdminHome(ctx, telegramId, auth.activeGame.id);
+        return;
+      }
+      await denyUnauthorized(ctx);
+      return;
+    }
+
+    const participants = await store.listParticipants(auth.activeGame.id);
+    const wishlistCount = participants.filter((p) => Boolean(p.wishlist)).length;
+    const recipient =
+      auth.activeGame.status === 'drawn' && auth.me.recipientId
+        ? await store.getParticipantById(auth.me.recipientId)
+        : null;
+
+    const text = formatHomeMessage(
+      auth.activeGame,
+      auth.me,
+      recipient,
+      participants.length,
+      wishlistCount,
+    );
+    const kb = buildHomeKeyboard({
+      status: auth.activeGame.status,
+      isAdmin: auth.isAdmin,
+      giftReady: auth.me.giftReady,
+      gamesCount: auth.userGames.length,
+      canCreateGame: auth.canCreateGame,
+    });
+    await safeEditOrSend(ctx, text, kb);
+  }
+
+  async function renderAdminHome(
+    ctx: Context,
+    telegramId: string,
+    explicitGameId?: number,
+  ): Promise<void> {
+    const auth = await resolveAuth(ctx, explicitGameId);
+    if (!auth || !auth.isAdmin) {
+      await safeAnswerCallback(ctx, 'Доступно только организатору.', true);
+      return;
+    }
+
+    await store.setActiveGame(telegramId, auth.activeGame.id);
+
+    const [participants, exclusions] = await Promise.all([
+      store.listParticipants(auth.activeGame.id),
+      store.listExclusions(auth.activeGame.id),
+    ]);
+
+    const grouped = groupExclusions(exclusions, participants);
+    const text = formatAdminDashboard(
+      auth.activeGame,
+      participants,
+      grouped.length,
+    );
+    const kb = buildAdminKeyboard({
+      status: auth.activeGame.status,
+      adminIsParticipant: Boolean(auth.me),
+      isSuperAdmin: auth.isSuperAdmin,
+      gamesCount: auth.userGames.length,
+      canCreateGame: auth.canCreateGame,
+    });
+    await safeEditOrSend(ctx, text, kb);
+  }
+
+  async function renderGamesList(ctx: Context, telegramId: string): Promise<void> {
+    const [userGames, session, createCheck] = await Promise.all([
+      store.listGamesForUser(telegramId),
+      store.getSession(telegramId),
+      checkCreateEligibility(telegramId),
+    ]);
+
+    if (userGames.length === 0 && !createCheck.eligible) {
+      await denyUnauthorized(ctx);
+      return;
+    }
+
+    const lines = userGames.map((g, idx) => {
+      const role = isGameAdmin(config, g, telegramId)
+        ? '👑 Организатор'
+        : '🎄 Участник';
+      const status =
+        g.status === 'registration' ? 'Регистрация' : 'Жеребьёвка проведена';
+      return `${idx + 1}. <b>${escapeHtml(g.title)}</b> — ${role} (${status})`;
+    });
+
+    const text = [
+      '🔀 <b>Твои игры «Тайный Санта»</b>',
+      '',
+      ...(lines.length > 0
+        ? lines
+        : ['<i>У тебя пока нет активных игр. Создай первую игру ниже!</i>']),
+      '',
+      'Выбери игру для перехода или создай новую:',
+    ].join('\n');
+
+    await safeEditOrSend(
+      ctx,
+      text,
+      buildGamesListKeyboard({
+        games: userGames,
+        activeGameId: session.activeGameId,
+        isAdminOf: (g) => isGameAdmin(config, g, telegramId),
+        canCreateGame: createCheck.eligible && !createCheck.limitReached,
+      }),
+    );
   }
 
   // --- Commands ---
@@ -213,63 +375,101 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     if (!telegramId) return;
 
     const payload = ctx.match?.trim() || '';
-    let game = await store.getGame();
 
-    // One-time admin claim if ADMIN_TELEGRAM_ID env var is not configured
+    // 1. One-time admin claim for game 1 if ADMIN_TELEGRAM_ID env var is unset
+    const game1 = await store.getGame(1);
     if (
+      game1 &&
       config.adminTelegramIds.size === 0 &&
-      !game.adminTelegramId &&
-      game.adminClaimCode &&
-      payload === game.adminClaimCode
+      !game1.adminTelegramId &&
+      game1.adminClaimCode &&
+      payload === game1.adminClaimCode
     ) {
-      game = await store.claimAdmin(telegramId);
+      await store.claimAdmin(1, telegramId);
       await ctx.reply(
         `👑 Права организатора привязаны к твоему аккаунту!\nТвой Telegram ID: <code>${escapeHtml(telegramId)}</code>`,
         { parse_mode: 'HTML' },
       );
-      await renderAdminHome(ctx, telegramId);
+      await renderAdminHome(ctx, telegramId, 1);
       return;
     }
 
-    const isAdmin = isAdminUser(config, game, telegramId);
-    const existing = await store.getParticipantByTelegramId(telegramId);
-
-    if (existing) {
-      await store.updateParticipantProfile(telegramId, {
-        username: ctx.from?.username ?? null,
-      });
-      await renderHome(ctx, telegramId);
-      return;
-    }
-
-    if (payload && payload === game.inviteCode) {
-      if (game.status === 'drawn') {
-        if (isAdmin) {
-          await renderAdminHome(ctx, telegramId);
-        } else {
-          await ctx.reply(
-            '🎄 Жеребьёвка уже проведена, регистрация новых участников закрыта.\nЕсли это ошибка — напиши организатору.',
-          );
-        }
+    // 2. Host creation pass (?start=host_...)
+    const hostInviteCode = await store.getHostInviteCode();
+    if (payload && payload === hostInviteCode) {
+      await store.grantHostAccess(telegramId);
+      const createCheck = await checkCreateEligibility(telegramId);
+      if (createCheck.limitReached) {
+        await ctx.reply(
+          '⚠️ Доступ к созданию игр уже активен, но достигнут лимит твоих комнат.',
+        );
+        await renderGamesList(ctx, telegramId);
         return;
       }
-
-      const { participant } = await store.upsertParticipant({
-        telegramId,
-        username: ctx.from?.username ?? null,
-        displayName: defaultDisplayName(ctx),
-      });
-
+      await store.setSessionState(telegramId, { type: 'create_game_title' });
       await ctx.reply(
-        `🎉 Добро пожаловать в «${escapeHtml(game.title)}», <b>${escapeHtml(participant.displayName)}</b>!\nЗаполни свой вишлист в меню ниже.`,
-        { parse_mode: 'HTML' },
+        '🎫 <b>Доступ организатора открыт!</b>\n\nПридумай и отправь название для твоей новой игры «Тайный Санта» (например: <code>Санта для семьи 🎄</code>):',
+        {
+          parse_mode: 'HTML',
+          reply_markup: buildCancelKeyboard('games:list'),
+        },
       );
-      await renderHome(ctx, telegramId);
       return;
     }
 
-    if (isAdmin) {
-      await renderAdminHome(ctx, telegramId);
+    // 3. Room invite link (?start=<inviteCode>)
+    if (payload) {
+      const targetGame = await store.getGameByInviteCode(payload);
+      if (targetGame) {
+        const existing = await store.getParticipantByTelegramId(
+          targetGame.id,
+          telegramId,
+        );
+        if (existing) {
+          await store.updateParticipantProfile(targetGame.id, telegramId, {
+            username: ctx.from?.username ?? null,
+          });
+          await renderHome(ctx, telegramId, targetGame.id);
+          return;
+        }
+
+        if (targetGame.status === 'drawn') {
+          if (isGameAdmin(config, targetGame, telegramId)) {
+            await renderAdminHome(ctx, telegramId, targetGame.id);
+          } else {
+            await ctx.reply(
+              `🎄 В игре «${escapeHtml(targetGame.title)}» жеребьёвка уже проведена, регистрация закрыта.\nЕсли это ошибка — напиши организатору этой игры.`,
+              { parse_mode: 'HTML' },
+            );
+          }
+          return;
+        }
+
+        const { participant } = await store.upsertParticipant(targetGame.id, {
+          telegramId,
+          username: ctx.from?.username ?? null,
+          displayName: defaultDisplayName(ctx),
+        });
+
+        await ctx.reply(
+          `🎉 Добро пожаловать в «${escapeHtml(targetGame.title)}», <b>${escapeHtml(participant.displayName)}</b>!\nЗаполни свой вишлист в меню ниже.`,
+          { parse_mode: 'HTML' },
+        );
+        await renderHome(ctx, telegramId, targetGame.id);
+        return;
+      }
+    }
+
+    // 4. Plain /start (or unknown code) -> open user's existing game or host creation
+    const auth = await resolveAuth(ctx);
+    if (auth) {
+      await renderHome(ctx, telegramId, auth.activeGame.id);
+      return;
+    }
+
+    const createCheck = await checkCreateEligibility(telegramId);
+    if (createCheck.eligible) {
+      await renderGamesList(ctx, telegramId);
       return;
     }
 
@@ -279,51 +479,138 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.command(['menu', 'santa'], async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
-    await renderHome(ctx, auth.telegramId);
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    await renderHome(ctx, telegramId);
+  });
+
+  bot.command('games', async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    await renderGamesList(ctx, telegramId);
   });
 
   bot.command('admin', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
-    if (!auth.isAdmin) {
-      await ctx.reply('⛔ Эта команда доступна только организатору.');
+    const auth = await resolveAuth(ctx);
+    if (!auth) {
+      await denyUnauthorized(ctx);
       return;
     }
-    await renderAdminHome(ctx, auth.telegramId);
+    if (!auth.isAdmin) {
+      await ctx.reply(
+        '⛔ В текущей игре ты участник, а не организатор.\nЕсли ты создавал свою игру — переключись на неё через /games.',
+      );
+      return;
+    }
+    await renderAdminHome(ctx, auth.telegramId, auth.activeGame.id);
   });
 
   bot.command('cancel', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
-    await store.setSession(auth.telegramId, { type: 'idle' });
-    await ctx.reply('Действие отменено.');
-    await renderHome(ctx, auth.telegramId);
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    await store.setSessionState(telegramId, { type: 'idle' });
+    const auth = await resolveAuth(ctx);
+    if (auth) {
+      await ctx.reply('Действие отменено.');
+      await renderHome(ctx, telegramId, auth.activeGame.id);
+    } else {
+      const createCheck = await checkCreateEligibility(telegramId);
+      if (createCheck.eligible) {
+        await ctx.reply('Действие отменено.');
+        await renderGamesList(ctx, telegramId);
+      }
+    }
+  });
+
+  // --- Games Switching & Creation ---
+
+  bot.callbackQuery('games:list', async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    await safeAnswerCallback(ctx);
+    await store.setSessionState(telegramId, { type: 'idle' });
+    await renderGamesList(ctx, telegramId);
+  });
+
+  bot.callbackQuery(/^games:select:(\d+)$/, async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const gameId = Number(ctx.match[1]);
+    const auth = await resolveAuth(ctx, gameId);
+    if (!auth) {
+      await safeAnswerCallback(ctx, 'Нет доступа к этой игре.', true);
+      return;
+    }
+    await safeAnswerCallback(ctx, `Открыта: ${auth.activeGame.title}`);
+    await renderHome(ctx, telegramId, gameId);
+  });
+
+  bot.callbackQuery('games:create', async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+
+    const createCheck = await checkCreateEligibility(telegramId);
+    if (!createCheck.eligible) {
+      await safeAnswerCallback(
+        ctx,
+        'Создание игр доступно участникам основной игры или по спецссылке от владельца бота.',
+        true,
+      );
+      return;
+    }
+    if (createCheck.limitReached) {
+      await safeAnswerCallback(
+        ctx,
+        'Достигнут лимит созданных игр для одного аккаунта.',
+        true,
+      );
+      return;
+    }
+
+    await safeAnswerCallback(ctx);
+    await store.setSessionState(telegramId, { type: 'create_game_title' });
+
+    const backCb =
+      (await store.listGamesForUser(telegramId)).length > 0
+        ? 'menu:home'
+        : 'games:list';
+
+    await safeEditOrSend(
+      ctx,
+      '🎄 <b>Новая игра «Тайный Санта»</b>\n\nНапиши название игры (например: <code>Семья Петровых 🎁</code> или <code>НГ с родственниками</code>):',
+      buildCancelKeyboard(backCb),
+    );
   });
 
   // --- Navigation Callbacks ---
 
   bot.callbackQuery('menu:home', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
     await safeAnswerCallback(ctx);
-    await renderHome(ctx, auth.telegramId);
+    await renderHome(ctx, telegramId);
   });
 
   bot.callbackQuery('game:participants', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
+    const auth = await resolveAuth(ctx);
+    if (!auth) {
+      await denyUnauthorized(ctx);
+      return;
+    }
     await safeAnswerCallback(ctx);
 
-    const participants = await store.listParticipants();
+    const participants = await store.listParticipants(auth.activeGame.id);
     const lines = participants.map((p, idx) => {
       const wishMark = p.wishlist ? '📝' : '⏳';
       return `${idx + 1}. ${formatParticipantLabel(p)} ${wishMark}`;
     });
 
     const text = [
-      `👥 <b>Участники (${participants.length}):</b>`,
+      `👥 <b>Участники «${escapeHtml(auth.activeGame.title)}» (${participants.length}):</b>`,
       '',
       ...(lines.length > 0 ? lines : ['<i>Пока никого нет</i>']),
       '',
@@ -340,51 +627,80 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   // --- Profile Editing ---
 
   bot.callbackQuery('profile:view', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
+    const auth = await resolveAuth(ctx);
     if (!auth || !auth.me) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(auth.telegramId, { type: 'idle' });
+    await store.setSessionState(auth.telegramId, { type: 'idle' });
     await safeEditOrSend(
       ctx,
-      formatMyProfileBlock(auth.me),
+      `<b>${escapeHtml(auth.activeGame.title)}</b>\n\n${formatMyProfileBlock(auth.me)}`,
       buildProfileViewKeyboard(),
     );
   });
 
   bot.callbackQuery('profile:name', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
+    const auth = await resolveAuth(ctx);
     if (!auth || !auth.me) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(auth.telegramId, { type: 'edit_name' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'edit_name',
+      gameId: auth.activeGame.id,
+    });
     await safeEditOrSend(
       ctx,
-      `✏️ Сейчас твоё имя: <b>${escapeHtml(auth.me.displayName)}</b>\n\nОтправь новое имя (как тебя знают друзья):`,
+      `✏️ Сейчас твоё имя в «${escapeHtml(auth.activeGame.title)}»: <b>${escapeHtml(auth.me.displayName)}</b>\n\nОтправь новое имя (как тебя знают в этой компании):`,
       buildCancelKeyboard('menu:home'),
     );
   });
 
   bot.callbackQuery('profile:wishlist', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
+    const auth = await resolveAuth(ctx);
     if (!auth || !auth.me) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(auth.telegramId, { type: 'edit_wishlist' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'edit_wishlist',
+      gameId: auth.activeGame.id,
+      append: false,
+    });
     const current = auth.me.wishlist
-      ? `\n\nСейчас указано:\n<i>${escapeHtml(auth.me.wishlist)}</i>`
+      ? `\n\nСейчас указано (нажми, чтобы скопировать):\n<code>${escapeHtml(auth.me.wishlist)}</code>`
       : '';
     await safeEditOrSend(
       ctx,
-      `🎁 Напиши свой вишлист — что тебе хотелось бы получить, идеи или ссылки:${current}`,
+      `🎁 Отправь новый текст вишлиста (он заменит старый) или нажми «➕ Дописать в конец», чтобы добавить подарки к существующему списку:${current}`,
+      buildWishlistPromptKeyboard(Boolean(auth.me.wishlist), 'menu:home'),
+    );
+  });
+
+  bot.callbackQuery('profile:wishlist_append', async (ctx) => {
+    const auth = await resolveAuth(ctx);
+    if (!auth || !auth.me) return;
+    await safeAnswerCallback(ctx);
+    await store.setSessionState(auth.telegramId, {
+      type: 'edit_wishlist',
+      gameId: auth.activeGame.id,
+      append: true,
+    });
+    const current = auth.me.wishlist
+      ? `\n\nТекущий список:\n<i>${escapeHtml(auth.me.wishlist)}</i>`
+      : '';
+    await safeEditOrSend(
+      ctx,
+      `➕ Отправь, что <b>добавить</b> к твоему вишлисту (мы допишем это с новой строки):${current}`,
       buildCancelKeyboard('menu:home'),
     );
   });
 
   bot.callbackQuery('profile:anti', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
+    const auth = await resolveAuth(ctx);
     if (!auth || !auth.me) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(auth.telegramId, { type: 'edit_antiwishlist' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'edit_antiwishlist',
+      gameId: auth.activeGame.id,
+    });
     const current = auth.me.antiWishlist
-      ? `\n\nСейчас указано:\n<i>${escapeHtml(auth.me.antiWishlist)}</i>`
+      ? `\n\nСейчас указано:\n<code>${escapeHtml(auth.me.antiWishlist)}</code>`
       : '';
     await safeEditOrSend(
       ctx,
@@ -396,17 +712,16 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   // --- Gift Ready Toggle ---
 
   bot.callbackQuery('gift:toggle', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
+    const auth = await resolveAuth(ctx);
     if (!auth || !auth.me) return;
 
-    const game = await store.getGame();
-    if (game.status !== 'drawn' || !auth.me.recipientId) {
+    if (auth.activeGame.status !== 'drawn' || !auth.me.recipientId) {
       await safeAnswerCallback(ctx, 'Жеребьёвка ещё не проведена.', true);
       return;
     }
 
     const nextReady = !auth.me.giftReady;
-    await store.setGiftReady(auth.telegramId, nextReady);
+    await store.setGiftReady(auth.activeGame.id, auth.telegramId, nextReady);
     await safeAnswerCallback(
       ctx,
       nextReady ? 'Отмечено: подарок готов! 🎁' : 'Отметка снята.',
@@ -418,7 +733,7 @@ export function registerHandlers({ bot, store, config }: Deps): void {
         try {
           await bot.api.sendMessage(
             recipient.telegramId,
-            '🎁 <b>Отличные новости!</b> Твой Тайный Санта отметил, что подарок уже готов или отправлен!',
+            `🎁 <b>Отличные новости!</b> <i>(${escapeHtml(auth.activeGame.title)})</i>\nТвой Тайный Санта отметил, что подарок уже готов или отправлен!`,
             { parse_mode: 'HTML' },
           );
         } catch {
@@ -427,16 +742,21 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       }
     }
 
-    await renderHome(ctx, auth.telegramId);
+    await renderHome(ctx, auth.telegramId, auth.activeGame.id);
   });
 
-  // --- Anonymous Chat ---
+  // --- Anonymous Chat (supports both explicit gameId and legacy callbacks) ---
 
-  bot.callbackQuery('chat:to_recipient', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth || !auth.me) return;
-    const game = await store.getGame();
-    if (game.status !== 'drawn' || !auth.me.recipientId) {
+  async function startChatToRecipient(
+    ctx: Context,
+    explicitGameId?: number,
+  ): Promise<void> {
+    const auth = await resolveAuth(ctx, explicitGameId);
+    if (!auth || !auth.me) {
+      await safeAnswerCallback(ctx, 'Участник в этой игре не найден.', true);
+      return;
+    }
+    if (auth.activeGame.status !== 'drawn' || !auth.me.recipientId) {
       await safeAnswerCallback(ctx, 'Сначала должна пройти жеребьёвка.', true);
       return;
     }
@@ -447,21 +767,29 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     await safeAnswerCallback(ctx);
-    await store.setSession(auth.telegramId, { type: 'msg_to_recipient' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'msg_to_recipient',
+      gameId: auth.activeGame.id,
+    });
     await ctx.reply(
-      `✉️ Напиши анонимное сообщение для <b>${escapeHtml(recipient.displayName)}</b>.\nТвоё имя не будет раскрыто.`,
+      `✉️ Напиши анонимное сообщение для <b>${escapeHtml(recipient.displayName)}</b> <i>(${escapeHtml(auth.activeGame.title)})</i>.\nТвоё имя не будет раскрыто.`,
       {
         parse_mode: 'HTML',
         reply_markup: buildCancelKeyboard('menu:home'),
       },
     );
-  });
+  }
 
-  bot.callbackQuery('chat:to_santa', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth || !auth.me) return;
-    const game = await store.getGame();
-    if (game.status !== 'drawn') {
+  async function startChatToSanta(
+    ctx: Context,
+    explicitGameId?: number,
+  ): Promise<void> {
+    const auth = await resolveAuth(ctx, explicitGameId);
+    if (!auth || !auth.me) {
+      await safeAnswerCallback(ctx, 'Участник в этой игре не найден.', true);
+      return;
+    }
+    if (auth.activeGame.status !== 'drawn') {
       await safeAnswerCallback(ctx, 'Сначала должна пройти жеребьёвка.', true);
       return;
     }
@@ -472,41 +800,55 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     await safeAnswerCallback(ctx);
-    await store.setSession(auth.telegramId, { type: 'msg_to_santa' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'msg_to_santa',
+      gameId: auth.activeGame.id,
+    });
     await ctx.reply(
-      '🎅 Напиши сообщение своему Тайному Санте — я перешлю его без раскрытия (Санта увидит только, что это от его подопечного):',
+      `🎅 Напиши сообщение своему Тайному Санте <i>(${escapeHtml(auth.activeGame.title)})</i> — я перешлю его без раскрытия (Санта увидит только, что это от его подопечного):`,
       {
+        parse_mode: 'HTML',
         reply_markup: buildCancelKeyboard('menu:home'),
       },
     );
-  });
+  }
+
+  bot.callbackQuery('chat:to_recipient', (ctx) => startChatToRecipient(ctx));
+  bot.callbackQuery(/^chat:to_recipient:(\d+)$/, (ctx) =>
+    startChatToRecipient(ctx, Number(ctx.match[1])),
+  );
+
+  bot.callbackQuery('chat:to_santa', (ctx) => startChatToSanta(ctx));
+  bot.callbackQuery(/^chat:to_santa:(\d+)$/, (ctx) =>
+    startChatToSanta(ctx, Number(ctx.match[1])),
+  );
 
   // --- Admin Panel ---
 
-  async function requireAdminCallback(
-    ctx: Context,
-  ): Promise<{ telegramId: string } | null> {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return null;
-    if (!auth.isAdmin) {
-      await safeAnswerCallback(ctx, 'Доступно только организатору.', true);
+  async function requireAdminCallback(ctx: Context): Promise<AuthContext | null> {
+    const auth = await resolveAuth(ctx);
+    if (!auth) {
+      await denyUnauthorized(ctx);
       return null;
     }
-    return { telegramId: auth.telegramId };
+    if (!auth.isAdmin) {
+      await safeAnswerCallback(ctx, 'Доступно только организатору этой игры.', true);
+      return null;
+    }
+    return auth;
   }
 
   bot.callbackQuery('admin:home', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
-    await renderAdminHome(ctx, admin.telegramId);
+    await renderAdminHome(ctx, auth.telegramId, auth.activeGame.id);
   });
 
   bot.callbackQuery('admin:join_self', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
-    const game = await store.getGame();
-    if (game.status === 'drawn') {
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
+    if (auth.activeGame.status === 'drawn') {
       await safeAnswerCallback(
         ctx,
         'Жеребьёвка уже проведена — сначала сбрось пары, чтобы добавить себя.',
@@ -514,44 +856,45 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       );
       return;
     }
-    await store.upsertParticipant({
-      telegramId: admin.telegramId,
+    await store.upsertParticipant(auth.activeGame.id, {
+      telegramId: auth.telegramId,
       username: ctx.from?.username ?? null,
       displayName: defaultDisplayName(ctx),
     });
     await safeAnswerCallback(ctx, 'Ты добавлен в список участников! 🎄');
-    await renderHome(ctx, admin.telegramId);
+    await renderHome(ctx, auth.telegramId, auth.activeGame.id);
   });
 
   bot.callbackQuery('admin:invite', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
 
-    const game = await store.getGame();
     const botUsername = bot.botInfo?.username;
     const link = botUsername
-      ? `https://t.me/${botUsername}?start=${game.inviteCode}`
-      : `Код приглашения: ${game.inviteCode}`;
+      ? `https://t.me/${botUsername}?start=${auth.activeGame.inviteCode}`
+      : `Код приглашения: ${auth.activeGame.inviteCode}`;
 
     const text = [
-      '🔗 <b>Приглашение для друзей</b>',
+      `🔗 <b>Приглашение в игру «${escapeHtml(auth.activeGame.title)}»</b>`,
       '',
-      `Отправь эту ссылку в ваш чат:`,
+      'Отправь эту ссылку участникам вашей игры:',
       `<code>${escapeHtml(link)}</code>`,
       '',
-      'Попасть в игру смогут только те, кто перейдёт по этой ссылке.',
+      'По этой ссылке люди попадут только в эту комнату и не увидят другие игры.',
     ].join('\n');
 
     await safeEditOrSend(ctx, text, buildAdminInviteKeyboard());
   });
 
   bot.callbackQuery('admin:invite:regen', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
 
     const newCode = crypto.randomBytes(6).toString('base64url');
-    const game = await store.updateGameSettings({ inviteCode: newCode });
+    const game = await store.updateGameSettings(auth.activeGame.id, {
+      inviteCode: newCode,
+    });
     await safeAnswerCallback(ctx, 'Инвайт-код обновлён!');
 
     const botUsername = bot.botInfo?.username;
@@ -560,7 +903,7 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       : `Код приглашения: ${game.inviteCode}`;
 
     const text = [
-      '🔗 <b>Новая ссылка для друзей</b>',
+      `🔗 <b>Новая ссылка для «${escapeHtml(game.title)}»</b>`,
       '',
       `<code>${escapeHtml(link)}</code>`,
       '',
@@ -570,25 +913,81 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     await safeEditOrSend(ctx, text, buildAdminInviteKeyboard());
   });
 
+  // --- Super-admin Host Invite Link (for friends outside game 1) ---
+
+  bot.callbackQuery('admin:host_invite', async (ctx) => {
+    const auth = await requireAdminCallback(ctx);
+    if (!auth || !auth.isSuperAdmin) {
+      await safeAnswerCallback(ctx, 'Доступно только владельцу бота.', true);
+      return;
+    }
+    await safeAnswerCallback(ctx);
+
+    const code = await store.getHostInviteCode();
+    const botUsername = bot.botInfo?.username;
+    const link = botUsername
+      ? `https://t.me/${botUsername}?start=${code}`
+      : `Код: ${code}`;
+
+    const text = [
+      '🎫 <b>Ссылка-пропуск для создания своей игры</b>',
+      '',
+      'Твои друзья из основной игры уже видят кнопку «➕ Создать свою игру» у себя в меню.',
+      'А эту ссылку можно отправить знакомым, которых нет в твоей игре — они смогут создать свою отдельную комнату для семьи/друзей:',
+      '',
+      `<code>${escapeHtml(link)}</code>`,
+    ].join('\n');
+
+    await safeEditOrSend(ctx, text, buildAdminHostInviteKeyboard());
+  });
+
+  bot.callbackQuery('admin:host_invite:regen', async (ctx) => {
+    const auth = await requireAdminCallback(ctx);
+    if (!auth || !auth.isSuperAdmin) {
+      await safeAnswerCallback(ctx, 'Доступно только владельцу бота.', true);
+      return;
+    }
+
+    const code = await store.regenerateHostInviteCode();
+    await safeAnswerCallback(ctx, 'Ссылка-пропуск обновлена!');
+
+    const botUsername = bot.botInfo?.username;
+    const link = botUsername
+      ? `https://t.me/${botUsername}?start=${code}`
+      : `Код: ${code}`;
+
+    const text = [
+      '🎫 <b>Новая ссылка-пропуск для создания игры</b>',
+      '',
+      `<code>${escapeHtml(link)}</code>`,
+      '',
+      'Старая ссылка-пропуск больше не действует.',
+    ].join('\n');
+
+    await safeEditOrSend(ctx, text, buildAdminHostInviteKeyboard());
+  });
+
   // --- Admin Settings ---
 
   bot.callbackQuery('admin:settings', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
-    const game = await store.getGame();
     await safeEditOrSend(
       ctx,
-      `📝 <b>Настройки игры</b>\n\n${formatGameHeader(game)}`,
+      `📝 <b>Настройки игры</b>\n\n${formatGameHeader(auth.activeGame)}`,
       buildAdminSettingsKeyboard(),
     );
   });
 
   bot.callbackQuery('admin:set_title', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(admin.telegramId, { type: 'admin_edit_title' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'admin_edit_title',
+      gameId: auth.activeGame.id,
+    });
     await safeEditOrSend(
       ctx,
       '✏️ Отправь новое название игры (например: <code>Тайный Санта 2027 🎄</code>):',
@@ -597,10 +996,13 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery('admin:set_budget', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(admin.telegramId, { type: 'admin_edit_budget' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'admin_edit_budget',
+      gameId: auth.activeGame.id,
+    });
     await safeEditOrSend(
       ctx,
       '💰 Отправь рекомендуемый бюджет подарка (например: <code>до 2000 ₽</code>):',
@@ -609,9 +1011,11 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery('admin:clear_budget', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
-    const game = await store.updateGameSettings({ budget: null });
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
+    const game = await store.updateGameSettings(auth.activeGame.id, {
+      budget: null,
+    });
     await safeAnswerCallback(ctx, 'Бюджет убран.');
     await safeEditOrSend(
       ctx,
@@ -621,21 +1025,26 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery('admin:set_date', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
-    await store.setSession(admin.telegramId, { type: 'admin_edit_date' });
+    await store.setSessionState(auth.telegramId, {
+      type: 'admin_edit_date',
+      gameId: auth.activeGame.id,
+    });
     await safeEditOrSend(
       ctx,
-      '📅 Отправь дату или место обмена подарками (например: <code>28 декабря, бар/дача</code>):',
+      '📅 Отправь дату или место обмена подарками (например: <code>28 декабря, дома</code>):',
       buildCancelKeyboard('admin:settings'),
     );
   });
 
   bot.callbackQuery('admin:clear_date', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
-    const game = await store.updateGameSettings({ eventDate: null });
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
+    const game = await store.updateGameSettings(auth.activeGame.id, {
+      eventDate: null,
+    });
     await safeAnswerCallback(ctx, 'Дата убрана.');
     await safeEditOrSend(
       ctx,
@@ -647,17 +1056,17 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   // --- Admin Participants Removal ---
 
   bot.callbackQuery('admin:participants', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
 
-    const participants = await store.listParticipants();
+    const participants = await store.listParticipants(auth.activeGame.id);
     const lines = participants.map(
       (p, i) => `${i + 1}. ${formatParticipantLabel(p)} ${p.wishlist ? '📝' : '⏳'}`,
     );
 
     const text = [
-      `👥 <b>Управление участниками (${participants.length})</b>`,
+      `👥 <b>Участники «${escapeHtml(auth.activeGame.title)}» (${participants.length})</b>`,
       '',
       ...(lines.length > 0 ? lines : ['<i>Пока никого нет</i>']),
       '',
@@ -672,20 +1081,19 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery(/^admin:del_user_ask:(\d+)$/, async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     const id = Number(ctx.match[1]);
     const target = await store.getParticipantById(id);
-    if (!target) {
+    if (!target || target.gameId !== auth.activeGame.id) {
       await safeAnswerCallback(ctx, 'Участник уже удалён.', true);
       return;
     }
 
-    const game = await store.getGame();
     await safeAnswerCallback(ctx);
 
     const warning =
-      game.status === 'drawn'
+      auth.activeGame.status === 'drawn'
         ? '\n\n⚠️ <b>Жеребьёвка уже проведена!</b> Удаление участника разорвёт пару — после этого лучше сбросить жеребьёвку и провести её заново.'
         : '';
 
@@ -697,20 +1105,20 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery(/^admin:del_user_do:(\d+)$/, async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     const id = Number(ctx.match[1]);
-    await store.removeParticipant(id);
+    await store.removeParticipant(auth.activeGame.id, id);
     await safeAnswerCallback(ctx, 'Участник удалён.');
 
-    const participants = await store.listParticipants();
+    const participants = await store.listParticipants(auth.activeGame.id);
     const lines = participants.map(
       (p, i) => `${i + 1}. ${formatParticipantLabel(p)} ${p.wishlist ? '📝' : '⏳'}`,
     );
     await safeEditOrSend(
       ctx,
       [
-        `👥 <b>Управление участниками (${participants.length})</b>`,
+        `👥 <b>Участники «${escapeHtml(auth.activeGame.title)}» (${participants.length})</b>`,
         '',
         ...(lines.length > 0 ? lines : ['<i>Пока никого нет</i>']),
       ].join('\n'),
@@ -720,18 +1128,19 @@ export function registerHandlers({ bot, store, config }: Deps): void {
 
   // --- Admin Exclusions (Forbidden Pairs) ---
 
-  async function renderAdminExclusions(ctx: Context): Promise<void> {
+  async function renderAdminExclusions(
+    ctx: Context,
+    gameId: number,
+  ): Promise<void> {
     const [participants, exclusions] = await Promise.all([
-      store.listParticipants(),
-      store.listExclusions(),
+      store.listParticipants(gameId),
+      store.listExclusions(gameId),
     ]);
     const grouped = groupExclusions(exclusions, participants);
 
     const lines = grouped.map((g, idx) => {
       const arrow = g.mutual ? '↔' : '→';
-      const desc = g.mutual
-        ? 'не дарят друг другу'
-        : 'не дарит';
+      const desc = g.mutual ? 'не дарят друг другу' : 'не дарит';
       return `${idx + 1}. <b>${escapeHtml(g.giver.displayName)}</b> ${arrow} <b>${escapeHtml(g.receiver.displayName)}</b> (${desc})`;
     });
 
@@ -752,16 +1161,16 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   }
 
   bot.callbackQuery('admin:exclusions', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
-    await renderAdminExclusions(ctx);
+    await renderAdminExclusions(ctx, auth.activeGame.id);
   });
 
   bot.callbackQuery('admin:ex_add', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
-    const participants = await store.listParticipants();
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
+    const participants = await store.listParticipants(auth.activeGame.id);
     if (participants.length < 2) {
       await safeAnswerCallback(
         ctx,
@@ -779,10 +1188,10 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery(/^admin:ex_giver:(\d+)$/, async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     const giverId = Number(ctx.match[1]);
-    const participants = await store.listParticipants();
+    const participants = await store.listParticipants(auth.activeGame.id);
     const giver = participants.find((p) => p.id === giverId);
     if (!giver) {
       await safeAnswerCallback(ctx, 'Участник не найден.', true);
@@ -797,15 +1206,20 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery(/^admin:ex_recv:(\d+):(\d+)$/, async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     const giverId = Number(ctx.match[1]);
     const receiverId = Number(ctx.match[2]);
     const [giver, receiver] = await Promise.all([
       store.getParticipantById(giverId),
       store.getParticipantById(receiverId),
     ]);
-    if (!giver || !receiver) {
+    if (
+      !giver ||
+      !receiver ||
+      giver.gameId !== auth.activeGame.id ||
+      receiver.gameId !== auth.activeGame.id
+    ) {
       await safeAnswerCallback(ctx, 'Участник не найден.', true);
       return;
     }
@@ -823,45 +1237,58 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery(/^admin:ex_save:(\d+):(\d+):(0|1)$/, async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     const giverId = Number(ctx.match[1]);
     const receiverId = Number(ctx.match[2]);
     const mutual = ctx.match[3] === '1';
 
-    await store.addExclusion(giverId, receiverId, mutual);
+    const [giver, receiver] = await Promise.all([
+      store.getParticipantById(giverId),
+      store.getParticipantById(receiverId),
+    ]);
+    if (
+      !giver ||
+      !receiver ||
+      giver.gameId !== auth.activeGame.id ||
+      receiver.gameId !== auth.activeGame.id
+    ) {
+      await safeAnswerCallback(ctx, 'Участник не найден.', true);
+      return;
+    }
+
+    await store.addExclusion(auth.activeGame.id, giverId, receiverId, mutual);
     await safeAnswerCallback(ctx, 'Пара-исключение добавлена!');
-    await renderAdminExclusions(ctx);
+    await renderAdminExclusions(ctx, auth.activeGame.id);
   });
 
   bot.callbackQuery(/^admin:ex_del:([\d_]+)$/, async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     const ids = ctx.match[1]
       .split('_')
       .map(Number)
       .filter((n) => Number.isFinite(n) && n > 0);
 
     for (const id of ids) {
-      await store.removeExclusion(id);
+      await store.removeExclusion(auth.activeGame.id, id);
     }
     await safeAnswerCallback(ctx, 'Исключение удалено!');
-    await renderAdminExclusions(ctx);
+    await renderAdminExclusions(ctx, auth.activeGame.id);
   });
 
   // --- Admin Draw & Reset ---
 
   bot.callbackQuery('admin:draw_confirm', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
 
-    const [game, participants, exclusions] = await Promise.all([
-      store.getGame(),
-      store.listParticipants(),
-      store.listExclusions(),
+    const [participants, exclusions] = await Promise.all([
+      store.listParticipants(auth.activeGame.id),
+      store.listExclusions(auth.activeGame.id),
     ]);
 
-    if (game.status === 'drawn') {
+    if (auth.activeGame.status === 'drawn') {
       await safeAnswerCallback(ctx, 'Жеребьёвка уже проведена!', true);
       return;
     }
@@ -892,7 +1319,7 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     const text = [
-      '🎲 <b>Запуск жеребьёвки</b>',
+      `🎲 <b>Запуск жеребьёвки — «${escapeHtml(auth.activeGame.title)}»</b>`,
       '',
       `Участников: <b>${participants.length}</b>`,
       `Пар-исключений: <b>${grouped.length}</b>`,
@@ -905,18 +1332,18 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   });
 
   bot.callbackQuery('admin:draw_run', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
 
-    const [game, participants, exclusions] = await Promise.all([
-      store.getGame(),
-      store.listParticipants(),
-      store.listExclusions(),
+    const game = auth.activeGame;
+    const [participants, exclusions] = await Promise.all([
+      store.listParticipants(game.id),
+      store.listExclusions(game.id),
     ]);
 
     if (game.status === 'drawn') {
       await safeAnswerCallback(ctx, 'Жеребьёвка уже была проведена!', true);
-      await renderAdminHome(ctx, admin.telegramId);
+      await renderAdminHome(ctx, auth.telegramId, game.id);
       return;
     }
 
@@ -935,7 +1362,7 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       return;
     }
 
-    const updatedGame = await store.applyDraw(assignments);
+    const updatedGame = await store.applyDraw(game.id, assignments);
     await safeAnswerCallback(ctx, 'Жеребьёвка проведена! 🎲');
 
     const byId = new Map(participants.map((p) => [p.id, p]));
@@ -952,10 +1379,16 @@ export function registerHandlers({ bot, store, config }: Deps): void {
         recipientId: receiver.id,
         giftReady: false,
       };
-      const isGiverAdmin = isAdminUser(config, updatedGame, giver.telegramId);
+      const isGiverAdmin = isGameAdmin(config, updatedGame, giver.telegramId);
+      const [giverGames, giverCreate] = await Promise.all([
+        store.listGamesForUser(giver.telegramId),
+        checkCreateEligibility(giver.telegramId),
+      ]);
+
+      await store.setActiveGame(giver.telegramId, updatedGame.id);
 
       const messageText = [
-        '🎉 <b>Жеребьёвка «Тайный Санта» прошла!</b>',
+        `🎉 <b>Жеребьёвка «${escapeHtml(updatedGame.title)}» прошла!</b>`,
         '',
         formatHomeMessage(
           updatedGame,
@@ -969,7 +1402,13 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       try {
         await bot.api.sendMessage(giver.telegramId, messageText, {
           parse_mode: 'HTML',
-          reply_markup: buildHomeKeyboard('drawn', isGiverAdmin, false),
+          reply_markup: buildHomeKeyboard({
+            status: 'drawn',
+            isAdmin: isGiverAdmin,
+            giftReady: false,
+            gamesCount: giverGames.length,
+            canCreateGame: giverCreate.eligible && !giverCreate.limitReached,
+          }),
           link_preview_options: { is_disabled: true },
         });
         delivered++;
@@ -979,7 +1418,7 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     const reportLines = [
-      `✅ <b>Жеребьёвка успешно проведена!</b>`,
+      `✅ <b>Жеребьёвка «${escapeHtml(updatedGame.title)}» успешно проведена!</b>`,
       `Уведомления доставлены: <b>${delivered}/${assignments.length}</b>.`,
     ];
     if (failedNames.length > 0) {
@@ -989,63 +1428,60 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     await ctx.reply(reportLines.join('\n'), { parse_mode: 'HTML' });
-    await renderAdminHome(ctx, admin.telegramId);
+    await renderAdminHome(ctx, auth.telegramId, updatedGame.id);
   });
 
   bot.callbackQuery('admin:reset_confirm', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
     await safeAnswerCallback(ctx);
     await safeEditOrSend(
       ctx,
-      '⚠️ <b>Сброс жеребьёвки</b>\n\nВсе текущие пары и отметки готовности подарков будут удалены. Участники и их вишлисты останутся, игра вернётся в режим регистрации.\n\nТочно сбросить?',
+      `⚠️ <b>Сброс жеребьёвки — «${escapeHtml(auth.activeGame.title)}»</b>\n\nВсе текущие пары и отметки готовности подарков в этой игре будут удалены. Участники и их вишлисты останутся, игра вернётся в режим регистрации.\n\nТочно сбросить?`,
       buildConfirmResetKeyboard(),
     );
   });
 
   bot.callbackQuery('admin:reset_run', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
 
-    await store.resetDraw();
+    await store.resetDraw(auth.activeGame.id);
     await safeAnswerCallback(ctx, 'Пары удалены, регистрация открыта снова.');
 
-    const participants = await store.listParticipants();
+    const participants = await store.listParticipants(auth.activeGame.id);
     for (const p of participants) {
-      if (p.telegramId === admin.telegramId) continue;
+      if (p.telegramId === auth.telegramId) continue;
       try {
         await bot.api.sendMessage(
           p.telegramId,
-          '🔄 Организатор сбросил текущую жеребьёвку. Скоро будет проведена новая — можешь пока обновить свой вишлист через /menu.',
+          `🔄 Организатор сбросил жеребьёвку в игре «${escapeHtml(auth.activeGame.title)}». Скоро будет проведена новая — можешь пока обновить свой вишлист через /menu.`,
+          { parse_mode: 'HTML' },
         );
       } catch {
         // Ignore delivery failures
       }
     }
 
-    await renderAdminHome(ctx, admin.telegramId);
+    await renderAdminHome(ctx, auth.telegramId, auth.activeGame.id);
   });
 
   // --- Admin Nudge ---
 
   bot.callbackQuery('admin:nudge', async (ctx) => {
-    const admin = await requireAdminCallback(ctx);
-    if (!admin) return;
+    const auth = await requireAdminCallback(ctx);
+    if (!auth) return;
 
-    const [game, participants] = await Promise.all([
-      store.getGame(),
-      store.listParticipants(),
-    ]);
-
+    const participants = await store.listParticipants(auth.activeGame.id);
     const targets =
-      game.status === 'registration'
+      auth.activeGame.status === 'registration'
         ? participants.filter((p) => !p.wishlist)
         : participants.filter((p) => !p.giftReady);
 
     if (targets.length === 0) {
       await safeAnswerCallback(
         ctx,
-        game.status === 'registration'
+        auth.activeGame.status === 'registration'
           ? 'У всех уже заполнены вишлисты! 🎉'
           : 'Все уже отметили готовность подарков! 🎉',
         true,
@@ -1056,11 +1492,11 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     let sent = 0;
     for (const p of targets) {
       const msg =
-        game.status === 'registration'
-          ? '🎄 Напоминание от Тайного Санты: заполни, пожалуйста, свой вишлист в /menu — скоро жеребьёвка!'
-          : '🎁 Напоминание от Тайного Санты: не забудь подготовить подарок и нажать «✅ Подарок готов» в /menu!';
+        auth.activeGame.status === 'registration'
+          ? `🎄 Напоминание по игре «${escapeHtml(auth.activeGame.title)}»: заполни, пожалуйста, свой вишлист в /menu — скоро жеребьёвка!`
+          : `🎁 Напоминание по игре «${escapeHtml(auth.activeGame.title)}»: не забудь подготовить подарок и нажать «✅ Подарок готов» в /menu!`;
       try {
-        await bot.api.sendMessage(p.telegramId, msg);
+        await bot.api.sendMessage(p.telegramId, msg, { parse_mode: 'HTML' });
         sent++;
       } catch {
         // Ignore blocked user
@@ -1077,19 +1513,74 @@ export function registerHandlers({ bot, store, config }: Deps): void {
   // --- Text Message FSM Handling ---
 
   bot.on('message:text', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
+    if (ctx.chat?.type !== 'private') return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
 
     const text = ctx.message.text.trim();
     if (text.startsWith('/')) {
       return;
     }
 
-    const session = await store.getSession(auth.telegramId);
+    const session = await store.getSession(telegramId);
+    const state = session.state;
 
-    switch (session.type) {
+    if (state.type === 'create_game_title') {
+      const createCheck = await checkCreateEligibility(telegramId);
+      if (!createCheck.eligible || createCheck.limitReached) {
+        await store.setSessionState(telegramId, { type: 'idle' });
+        await ctx.reply('⛔ Создание игры сейчас недоступно.');
+        return;
+      }
+
+      if (text.length === 0 || text.length > 80) {
+        await ctx.reply(
+          'Название игры должно быть от 1 до 80 символов. Попробуй ещё раз:',
+        );
+        return;
+      }
+
+      const inviteCode = crypto.randomBytes(6).toString('base64url');
+      const newGame = await store.createGame({
+        title: text,
+        adminTelegramId: telegramId,
+        inviteCode,
+      });
+
+      await store.setActiveGame(telegramId, newGame.id);
+
+      const botUsername = bot.botInfo?.username;
+      const link = botUsername
+        ? `https://t.me/${botUsername}?start=${newGame.inviteCode}`
+        : `Код: ${newGame.inviteCode}`;
+
+      await ctx.reply(
+        [
+          `🎉 Игра <b>«${escapeHtml(newGame.title)}»</b> создана!`,
+          '',
+          '🔗 Ссылка-приглашение для участников:',
+          `<code>${escapeHtml(link)}</code>`,
+          '',
+          'Если ты тоже будешь участвовать — нажми «🎄 Присоединиться к игре» в админке ниже.',
+        ].join('\n'),
+        { parse_mode: 'HTML' },
+      );
+
+      await renderAdminHome(ctx, telegramId, newGame.id);
+      return;
+    }
+
+    const explicitGameId =
+      'gameId' in state ? state.gameId : undefined;
+    const auth = await resolveAuth(ctx, explicitGameId);
+    if (!auth) {
+      await denyUnauthorized(ctx);
+      return;
+    }
+
+    switch (state.type) {
       case 'idle': {
-        await renderHome(ctx, auth.telegramId);
+        await renderHome(ctx, telegramId, auth.activeGame.id);
         return;
       }
 
@@ -1099,43 +1590,55 @@ export function registerHandlers({ bot, store, config }: Deps): void {
           await ctx.reply('Имя должно быть от 1 до 60 символов. Попробуй ещё раз:');
           return;
         }
-        await store.updateParticipantProfile(auth.telegramId, {
+        await store.updateParticipantProfile(auth.activeGame.id, telegramId, {
           displayName: text,
         });
-        await store.setSession(auth.telegramId, { type: 'idle' });
+        await store.setSessionState(telegramId, { type: 'idle' });
         await ctx.reply(`✅ Имя обновлено: <b>${escapeHtml(text)}</b>`, {
           parse_mode: 'HTML',
         });
-        await renderHome(ctx, auth.telegramId);
+        await renderHome(ctx, telegramId, auth.activeGame.id);
         return;
       }
 
       case 'edit_wishlist':
       case 'edit_antiwishlist': {
         if (!auth.me) return;
-        if (text.length === 0 || text.length > 1500) {
+
+        let nextText = text;
+        if (
+          state.type === 'edit_wishlist' &&
+          state.append &&
+          auth.me.wishlist
+        ) {
+          nextText = `${auth.me.wishlist}\n${text}`;
+        }
+
+        if (nextText.length === 0 || nextText.length > 1500) {
           await ctx.reply(
-            'Текст должен быть от 1 до 1500 символов. Попробуй покороче:',
+            'Текст должен быть от 1 до 1500 символов (включая старый список). Попробуй покороче:',
           );
           return;
         }
 
         const patch =
-          session.type === 'edit_wishlist'
-            ? { wishlist: text }
-            : { antiWishlist: text };
-        await store.updateParticipantProfile(auth.telegramId, patch);
-        await store.setSession(auth.telegramId, { type: 'idle' });
+          state.type === 'edit_wishlist'
+            ? { wishlist: nextText }
+            : { antiWishlist: nextText };
+        await store.updateParticipantProfile(
+          auth.activeGame.id,
+          telegramId,
+          patch,
+        );
+        await store.setSessionState(telegramId, { type: 'idle' });
 
-        // Notify Santa if draw already happened
-        const game = await store.getGame();
-        if (game.status === 'drawn') {
+        if (auth.activeGame.status === 'drawn') {
           const santa = await store.getSantaForRecipient(auth.me.id);
           if (santa) {
             try {
               await bot.api.sendMessage(
                 santa.telegramId,
-                `📝 Твой подопечный (<b>${escapeHtml(auth.me.displayName)}</b>) обновил ${session.type === 'edit_wishlist' ? 'вишлист' : 'пожелания по доставке/ограничениям'}! Проверь в /menu.`,
+                `📝 <i>(${escapeHtml(auth.activeGame.title)})</i>\nТвой подопечный (<b>${escapeHtml(auth.me.displayName)}</b>) обновил ${state.type === 'edit_wishlist' ? 'вишлист' : 'пожелания по доставке/ограничениям'}! Проверь в /menu.`,
                 { parse_mode: 'HTML' },
               );
             } catch {
@@ -1145,18 +1648,18 @@ export function registerHandlers({ bot, store, config }: Deps): void {
         }
 
         await ctx.reply('✅ Анкета сохранена!');
-        await renderHome(ctx, auth.telegramId);
+        await renderHome(ctx, telegramId, auth.activeGame.id);
         return;
       }
 
       case 'msg_to_recipient': {
         if (!auth.me || !auth.me.recipientId) {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           return;
         }
         const recipient = await store.getParticipantById(auth.me.recipientId);
         if (!recipient) {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           await ctx.reply('Подопечный не найден.');
           return;
         }
@@ -1164,35 +1667,35 @@ export function registerHandlers({ bot, store, config }: Deps): void {
         try {
           await bot.api.sendMessage(
             recipient.telegramId,
-            `🎅 <b>Сообщение от твоего Тайного Санты:</b>\n\n${escapeHtml(text)}`,
+            `🎅 <b>Сообщение от твоего Тайного Санты</b> <i>(${escapeHtml(auth.activeGame.title)})</i>:\n\n${escapeHtml(text)}`,
             {
               parse_mode: 'HTML',
               reply_markup: new InlineKeyboard().text(
                 '↩️ Ответить Санте',
-                'chat:to_santa',
+                `chat:to_santa:${auth.activeGame.id}`,
               ),
             },
           );
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           await ctx.reply('✅ Сообщение отправлено подопечному анонимно!');
         } catch {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           await ctx.reply(
             '❌ Не удалось доставить сообщение (возможно, получатель заблокировал бота).',
           );
         }
-        await renderHome(ctx, auth.telegramId);
+        await renderHome(ctx, telegramId, auth.activeGame.id);
         return;
       }
 
       case 'msg_to_santa': {
         if (!auth.me) {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           return;
         }
         const santa = await store.getSantaForRecipient(auth.me.id);
         if (!santa) {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           await ctx.reply('Твой Санта не найден.');
           return;
         }
@@ -1200,24 +1703,24 @@ export function registerHandlers({ bot, store, config }: Deps): void {
         try {
           await bot.api.sendMessage(
             santa.telegramId,
-            `🎁 <b>Ответ от твоего подопечного (${escapeHtml(auth.me.displayName)}):</b>\n\n${escapeHtml(text)}`,
+            `🎁 <b>Ответ от твоего подопечного (${escapeHtml(auth.me.displayName)})</b> <i>(${escapeHtml(auth.activeGame.title)})</i>:\n\n${escapeHtml(text)}`,
             {
               parse_mode: 'HTML',
               reply_markup: new InlineKeyboard().text(
                 '↩️ Ответить подопечному',
-                'chat:to_recipient',
+                `chat:to_recipient:${auth.activeGame.id}`,
               ),
             },
           );
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           await ctx.reply('✅ Ответ отправлен твоему Тайному Санте!');
         } catch {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           await ctx.reply(
             '❌ Не удалось доставить сообщение (возможно, твой Санта остановил бота).',
           );
         }
-        await renderHome(ctx, auth.telegramId);
+        await renderHome(ctx, telegramId, auth.activeGame.id);
         return;
       }
 
@@ -1225,7 +1728,7 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       case 'admin_edit_budget':
       case 'admin_edit_date': {
         if (!auth.isAdmin) {
-          await store.setSession(auth.telegramId, { type: 'idle' });
+          await store.setSessionState(telegramId, { type: 'idle' });
           return;
         }
         if (text.length === 0 || text.length > 100) {
@@ -1233,20 +1736,26 @@ export function registerHandlers({ bot, store, config }: Deps): void {
           return;
         }
 
-        if (session.type === 'admin_edit_title') {
-          await store.updateGameSettings({ title: text });
-        } else if (session.type === 'admin_edit_budget') {
-          await store.updateGameSettings({ budget: text });
+        let updatedGame: GameSettings;
+        if (state.type === 'admin_edit_title') {
+          updatedGame = await store.updateGameSettings(auth.activeGame.id, {
+            title: text,
+          });
+        } else if (state.type === 'admin_edit_budget') {
+          updatedGame = await store.updateGameSettings(auth.activeGame.id, {
+            budget: text,
+          });
         } else {
-          await store.updateGameSettings({ eventDate: text });
+          updatedGame = await store.updateGameSettings(auth.activeGame.id, {
+            eventDate: text,
+          });
         }
 
-        await store.setSession(auth.telegramId, { type: 'idle' });
+        await store.setSessionState(telegramId, { type: 'idle' });
         await ctx.reply('✅ Настройка сохранена!');
-        const game = await store.getGame();
         await safeEditOrSend(
           ctx,
-          `📝 <b>Настройки игры</b>\n\n${formatGameHeader(game)}`,
+          `📝 <b>Настройки игры</b>\n\n${formatGameHeader(updatedGame)}`,
           buildAdminSettingsKeyboard(),
         );
         return;
@@ -1256,10 +1765,11 @@ export function registerHandlers({ bot, store, config }: Deps): void {
 
   // Fallback for non-text messages while waiting for text input
   bot.on('message', async (ctx) => {
-    const auth = await requireParticipantOrAdmin(ctx);
-    if (!auth) return;
-    const session = await store.getSession(auth.telegramId);
-    if (session.type !== 'idle') {
+    if (ctx.chat?.type !== 'private') return;
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const session = await store.getSession(telegramId);
+    if (session.state.type !== 'idle') {
       await ctx.reply(
         'Пожалуйста, отправь обычное текстовое сообщение (или нажми ❌ Отмена).',
         { reply_markup: buildCancelKeyboard('menu:home') },

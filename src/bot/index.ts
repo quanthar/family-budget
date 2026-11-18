@@ -17,6 +17,7 @@ export function createBot(store: SantaStore, config: AppConfig): Bot {
 export async function configureBotCommands(bot: Bot): Promise<void> {
   await bot.api.setMyCommands([
     { command: 'menu', description: 'Открыть главное меню' },
+    { command: 'games', description: 'Мои игры и создание новой' },
     { command: 'admin', description: 'Админ-панель (для организатора)' },
     { command: 'cancel', description: 'Отменить текущий ввод' },
   ]);

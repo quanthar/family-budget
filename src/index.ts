@@ -14,8 +14,9 @@ async function main(): Promise<void> {
   await bot.init();
   console.log(`[BOT] Authorized as @${bot.botInfo.username}`);
 
-  const game = await store.getGame();
+  const game = await store.getGame(1);
   if (
+    game &&
     config.adminTelegramIds.size === 0 &&
     !game.adminTelegramId &&
     game.adminClaimCode
