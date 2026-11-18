@@ -8,11 +8,32 @@ export function buildCancelKeyboard(backCallback = 'menu:home'): InlineKeyboard 
 
 export function buildWishlistPromptKeyboard(
   hasExistingWishlist: boolean,
+  gameId: number,
   backCallback = 'menu:home',
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
   if (hasExistingWishlist) {
-    kb.text('➕ Дописать в конец (не удаляя старое)', 'profile:wishlist_append').row();
+    kb.text(
+      '➕ Дописать в конец (не удаляя старое)',
+      `profile:wishlist_append:g:${gameId}`,
+    ).row();
+  }
+  kb.text('❌ Отмена', backCallback);
+  return kb;
+}
+
+export function buildActionGamePickerKeyboard(
+  games: Array<{ game: GameSettings; labelSuffix?: string }>,
+  callbackPrefix: string,
+  backCallback = 'menu:home',
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const item of games) {
+    const suffix = item.labelSuffix ? ` ${item.labelSuffix}` : '';
+    kb.text(
+      `${item.game.title}${suffix}`,
+      `${callbackPrefix}${item.game.id}`,
+    ).row();
   }
   kb.text('❌ Отмена', backCallback);
   return kb;
@@ -89,12 +110,12 @@ export function buildGamesListKeyboard(opts: {
   return kb;
 }
 
-export function buildProfileViewKeyboard(): InlineKeyboard {
+export function buildProfileViewKeyboard(gameId: number): InlineKeyboard {
   return new InlineKeyboard()
-    .text('✏️ Изменить имя', 'profile:name')
-    .text('🎁 Изменить вишлист', 'profile:wishlist')
+    .text('✏️ Изменить имя', `profile:name:g:${gameId}`)
+    .text('🎁 Изменить вишлист', `profile:wishlist:g:${gameId}`)
     .row()
-    .text('🚫 Что не дарить / доставка', 'profile:anti')
+    .text('🚫 Что не дарить / доставка', `profile:anti:g:${gameId}`)
     .row()
     .text('⬅️ В главное меню', 'menu:home');
 }

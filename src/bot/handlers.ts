@@ -15,6 +15,7 @@ import {
   groupExclusions,
 } from './formatters.js';
 import {
+  buildActionGamePickerKeyboard,
   buildAdminDeleteParticipantConfirmKeyboard,
   buildAdminExclusionsKeyboard,
   buildAdminHostInviteKeyboard,
@@ -595,15 +596,15 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     await renderHome(ctx, telegramId);
   });
 
-  bot.callbackQuery('game:participants', async (ctx) => {
-    const auth = await resolveAuth(ctx);
+  async function showParticipantsList(ctx: Context, gameId: number): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
     if (!auth) {
       await denyUnauthorized(ctx);
       return;
     }
-    await safeAnswerCallback(ctx);
+    await store.setActiveGame(auth.telegramId, gameId);
 
-    const participants = await store.listParticipants(auth.activeGame.id);
+    const participants = await store.listParticipants(gameId);
     const lines = participants.map((p, idx) => {
       const wishMark = p.wishlist ? '📝' : '⏳';
       return `${idx + 1}. ${formatParticipantLabel(p)} ${wishMark}`;
@@ -622,44 +623,83 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       text,
       new InlineKeyboard().text('⬅️ В главное меню', 'menu:home'),
     );
-  });
+  }
 
-  // --- Profile Editing ---
-
-  bot.callbackQuery('profile:view', async (ctx) => {
-    const auth = await resolveAuth(ctx);
-    if (!auth || !auth.me) return;
+  bot.callbackQuery('game:participants', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) {
+      await denyUnauthorized(ctx);
+      return;
+    }
     await safeAnswerCallback(ctx);
-    await store.setSessionState(auth.telegramId, { type: 'idle' });
+    if (pGames.length === 1) {
+      await showParticipantsList(ctx, pGames[0].game.id);
+      return;
+    }
     await safeEditOrSend(
       ctx,
-      `<b>${escapeHtml(auth.activeGame.title)}</b>\n\n${formatMyProfileBlock(auth.me)}`,
-      buildProfileViewKeyboard(),
+      '👥 <b>Для какой комнаты показать список участников?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game }) => ({ game })),
+        'game:participants:g:',
+      ),
     );
   });
 
-  bot.callbackQuery('profile:name', async (ctx) => {
-    const auth = await resolveAuth(ctx);
-    if (!auth || !auth.me) return;
+  bot.callbackQuery(/^game:participants:g:(\d+)$/, async (ctx) => {
     await safeAnswerCallback(ctx);
+    await showParticipantsList(ctx, Number(ctx.match[1]));
+  });
+
+  // --- Profile Editing (with multi-room picker when user participates in >1 game) ---
+
+  async function getParticipantGames(
+    telegramId: string,
+  ): Promise<Array<{ game: GameSettings; me: Participant }>> {
+    const games = await store.listGamesForUser(telegramId);
+    const result: Array<{ game: GameSettings; me: Participant }> = [];
+    for (const game of games) {
+      const me = await store.getParticipantByTelegramId(game.id, telegramId);
+      if (me) result.push({ game, me });
+    }
+    return result;
+  }
+
+  async function openProfileView(ctx: Context, gameId: number): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
+    if (!auth || !auth.me) return;
+    await store.setActiveGame(auth.telegramId, gameId);
+    await safeEditOrSend(
+      ctx,
+      `<b>${escapeHtml(auth.activeGame.title)}</b>\n\n${formatMyProfileBlock(auth.me)}`,
+      buildProfileViewKeyboard(gameId),
+    );
+  }
+
+  async function openEditName(ctx: Context, gameId: number): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
+    if (!auth || !auth.me) return;
+    await store.setActiveGame(auth.telegramId, gameId);
     await store.setSessionState(auth.telegramId, {
       type: 'edit_name',
-      gameId: auth.activeGame.id,
+      gameId,
     });
     await safeEditOrSend(
       ctx,
       `✏️ Сейчас твоё имя в «${escapeHtml(auth.activeGame.title)}»: <b>${escapeHtml(auth.me.displayName)}</b>\n\nОтправь новое имя (как тебя знают в этой компании):`,
       buildCancelKeyboard('menu:home'),
     );
-  });
+  }
 
-  bot.callbackQuery('profile:wishlist', async (ctx) => {
-    const auth = await resolveAuth(ctx);
+  async function openEditWishlist(ctx: Context, gameId: number): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
     if (!auth || !auth.me) return;
-    await safeAnswerCallback(ctx);
+    await store.setActiveGame(auth.telegramId, gameId);
     await store.setSessionState(auth.telegramId, {
       type: 'edit_wishlist',
-      gameId: auth.activeGame.id,
+      gameId,
       append: false,
     });
     const current = auth.me.wishlist
@@ -667,18 +707,21 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       : '';
     await safeEditOrSend(
       ctx,
-      `🎁 Отправь новый текст вишлиста (он заменит старый) или нажми «➕ Дописать в конец», чтобы добавить подарки к существующему списку:${current}`,
-      buildWishlistPromptKeyboard(Boolean(auth.me.wishlist), 'menu:home'),
+      `🎁 <b>${escapeHtml(auth.activeGame.title)}</b>\n\nОтправь новый текст вишлиста (он заменит старый) или нажми «➕ Дописать в конец», чтобы добавить подарки к существующему списку:${current}`,
+      buildWishlistPromptKeyboard(Boolean(auth.me.wishlist), gameId, 'menu:home'),
     );
-  });
+  }
 
-  bot.callbackQuery('profile:wishlist_append', async (ctx) => {
-    const auth = await resolveAuth(ctx);
+  async function openAppendWishlist(
+    ctx: Context,
+    gameId: number,
+  ): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
     if (!auth || !auth.me) return;
-    await safeAnswerCallback(ctx);
+    await store.setActiveGame(auth.telegramId, gameId);
     await store.setSessionState(auth.telegramId, {
       type: 'edit_wishlist',
-      gameId: auth.activeGame.id,
+      gameId,
       append: true,
     });
     const current = auth.me.wishlist
@@ -686,42 +729,47 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       : '';
     await safeEditOrSend(
       ctx,
-      `➕ Отправь, что <b>добавить</b> к твоему вишлисту (мы допишем это с новой строки):${current}`,
+      `➕ <b>${escapeHtml(auth.activeGame.title)}</b>\n\nОтправь, что <b>добавить</b> к твоему вишлисту (мы допишем это с новой строки):${current}`,
       buildCancelKeyboard('menu:home'),
     );
-  });
+  }
 
-  bot.callbackQuery('profile:anti', async (ctx) => {
-    const auth = await resolveAuth(ctx);
+  async function openEditAnti(ctx: Context, gameId: number): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
     if (!auth || !auth.me) return;
-    await safeAnswerCallback(ctx);
+    await store.setActiveGame(auth.telegramId, gameId);
     await store.setSessionState(auth.telegramId, {
       type: 'edit_antiwishlist',
-      gameId: auth.activeGame.id,
+      gameId,
     });
     const current = auth.me.antiWishlist
       ? `\n\nСейчас указано:\n<code>${escapeHtml(auth.me.antiWishlist)}</code>`
       : '';
     await safeEditOrSend(
       ctx,
-      `🚫 Напиши, что точно НЕ стоит дарить (аллергии, нелюбимое), и можешь указать удобный ПВЗ / способ доставки:${current}`,
+      `🚫 <b>${escapeHtml(auth.activeGame.title)}</b>\n\nНапиши, что точно НЕ стоит дарить (аллергии, нелюбимое), и можешь указать удобный ПВЗ / способ доставки:${current}`,
       buildCancelKeyboard('menu:home'),
     );
-  });
+  }
 
-  // --- Gift Ready Toggle ---
-
-  bot.callbackQuery('gift:toggle', async (ctx) => {
-    const auth = await resolveAuth(ctx);
+  async function toggleGiftReadyForGame(
+    ctx: Context,
+    gameId: number,
+  ): Promise<void> {
+    const auth = await resolveAuth(ctx, gameId);
     if (!auth || !auth.me) return;
 
     if (auth.activeGame.status !== 'drawn' || !auth.me.recipientId) {
-      await safeAnswerCallback(ctx, 'Жеребьёвка ещё не проведена.', true);
+      await safeAnswerCallback(
+        ctx,
+        `В игре «${auth.activeGame.title}» жеребьёвка ещё не проведена.`,
+        true,
+      );
       return;
     }
 
     const nextReady = !auth.me.giftReady;
-    await store.setGiftReady(auth.activeGame.id, auth.telegramId, nextReady);
+    await store.setGiftReady(gameId, auth.telegramId, nextReady);
     await safeAnswerCallback(
       ctx,
       nextReady ? 'Отмечено: подарок готов! 🎁' : 'Отметка снята.',
@@ -742,14 +790,169 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       }
     }
 
-    await renderHome(ctx, auth.telegramId, auth.activeGame.id);
+    await renderHome(ctx, auth.telegramId, gameId);
+  }
+
+  bot.callbackQuery('profile:view', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+    await safeAnswerCallback(ctx);
+    if (pGames.length === 1) {
+      await openProfileView(ctx, pGames[0].game.id);
+      return;
+    }
+    await safeEditOrSend(
+      ctx,
+      '📝 <b>Для какой комнаты открыть анкету?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game }) => ({ game })),
+        'profile:view:g:',
+      ),
+    );
   });
 
-  // --- Anonymous Chat (supports both explicit gameId and legacy callbacks) ---
+  bot.callbackQuery(/^profile:view:g:(\d+)$/, async (ctx) => {
+    await safeAnswerCallback(ctx);
+    await openProfileView(ctx, Number(ctx.match[1]));
+  });
+
+  bot.callbackQuery('profile:name', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+    await safeAnswerCallback(ctx);
+    if (pGames.length === 1) {
+      await openEditName(ctx, pGames[0].game.id);
+      return;
+    }
+    await safeEditOrSend(
+      ctx,
+      '✏️ <b>Для какой комнаты изменить твоё имя?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game, me }) => ({
+          game,
+          labelSuffix: `(${me.displayName})`,
+        })),
+        'profile:name:g:',
+      ),
+    );
+  });
+
+  bot.callbackQuery(/^profile:name:g:(\d+)$/, async (ctx) => {
+    await safeAnswerCallback(ctx);
+    await openEditName(ctx, Number(ctx.match[1]));
+  });
+
+  bot.callbackQuery('profile:wishlist', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+    await safeAnswerCallback(ctx);
+    if (pGames.length === 1) {
+      await openEditWishlist(ctx, pGames[0].game.id);
+      return;
+    }
+    await safeEditOrSend(
+      ctx,
+      '🎁 <b>Для какой комнаты изменить / дополнить вишлист?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game, me }) => ({
+          game,
+          labelSuffix: me.wishlist ? '📝' : '⏳',
+        })),
+        'profile:wishlist:g:',
+      ),
+    );
+  });
+
+  bot.callbackQuery(/^profile:wishlist:g:(\d+)$/, async (ctx) => {
+    await safeAnswerCallback(ctx);
+    await openEditWishlist(ctx, Number(ctx.match[1]));
+  });
+
+  bot.callbackQuery('profile:wishlist_append', async (ctx) => {
+    const auth = await resolveAuth(ctx);
+    if (!auth || !auth.me) return;
+    await safeAnswerCallback(ctx);
+    await openAppendWishlist(ctx, auth.activeGame.id);
+  });
+
+  bot.callbackQuery(/^profile:wishlist_append:g:(\d+)$/, async (ctx) => {
+    await safeAnswerCallback(ctx);
+    await openAppendWishlist(ctx, Number(ctx.match[1]));
+  });
+
+  bot.callbackQuery('profile:anti', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+    await safeAnswerCallback(ctx);
+    if (pGames.length === 1) {
+      await openEditAnti(ctx, pGames[0].game.id);
+      return;
+    }
+    await safeEditOrSend(
+      ctx,
+      '🚫 <b>Для какой комнаты указать, что не дарить / доставку?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game }) => ({ game })),
+        'profile:anti:g:',
+      ),
+    );
+  });
+
+  bot.callbackQuery(/^profile:anti:g:(\d+)$/, async (ctx) => {
+    await safeAnswerCallback(ctx);
+    await openEditAnti(ctx, Number(ctx.match[1]));
+  });
+
+  // --- Gift Ready Toggle ---
+
+  bot.callbackQuery('gift:toggle', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+
+    if (pGames.length === 1) {
+      await toggleGiftReadyForGame(ctx, pGames[0].game.id);
+      return;
+    }
+
+    await safeAnswerCallback(ctx);
+    await safeEditOrSend(
+      ctx,
+      '🎁 <b>Для какой комнаты изменить статус готовности подарка?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game, me }) => ({
+          game,
+          labelSuffix:
+            game.status !== 'drawn'
+              ? '(⏳ ждёт жеребьёвки)'
+              : me.giftReady
+                ? '(✅ готов)'
+                : '(⏳ в процессе)',
+        })),
+        'gift:toggle:g:',
+      ),
+    );
+  });
+
+  bot.callbackQuery(/^gift:toggle:g:(\d+)$/, async (ctx) => {
+    await toggleGiftReadyForGame(ctx, Number(ctx.match[1]));
+  });
+
+  // --- Anonymous Chat (multi-room picker from menu + direct gameId on incoming letters) ---
 
   async function startChatToRecipient(
     ctx: Context,
-    explicitGameId?: number,
+    explicitGameId: number,
+    replaceMessage: boolean,
   ): Promise<void> {
     const auth = await resolveAuth(ctx, explicitGameId);
     if (!auth || !auth.me) {
@@ -757,7 +960,11 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       return;
     }
     if (auth.activeGame.status !== 'drawn' || !auth.me.recipientId) {
-      await safeAnswerCallback(ctx, 'Сначала должна пройти жеребьёвка.', true);
+      await safeAnswerCallback(
+        ctx,
+        `В игре «${auth.activeGame.title}» жеребьёвка ещё не проведена.`,
+        true,
+      );
       return;
     }
     const recipient = await store.getParticipantById(auth.me.recipientId);
@@ -767,22 +974,27 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     await safeAnswerCallback(ctx);
+    await store.setActiveGame(auth.telegramId, explicitGameId);
     await store.setSessionState(auth.telegramId, {
       type: 'msg_to_recipient',
-      gameId: auth.activeGame.id,
+      gameId: explicitGameId,
     });
-    await ctx.reply(
-      `✉️ Напиши анонимное сообщение для <b>${escapeHtml(recipient.displayName)}</b> <i>(${escapeHtml(auth.activeGame.title)})</i>.\nТвоё имя не будет раскрыто.`,
-      {
+
+    const prompt = `✉️ Напиши анонимное сообщение для <b>${escapeHtml(recipient.displayName)}</b> <i>(${escapeHtml(auth.activeGame.title)})</i>.\nТвоё имя не будет раскрыто.`;
+    if (replaceMessage) {
+      await safeEditOrSend(ctx, prompt, buildCancelKeyboard('menu:home'));
+    } else {
+      await ctx.reply(prompt, {
         parse_mode: 'HTML',
         reply_markup: buildCancelKeyboard('menu:home'),
-      },
-    );
+      });
+    }
   }
 
   async function startChatToSanta(
     ctx: Context,
-    explicitGameId?: number,
+    explicitGameId: number,
+    replaceMessage: boolean,
   ): Promise<void> {
     const auth = await resolveAuth(ctx, explicitGameId);
     if (!auth || !auth.me) {
@@ -790,7 +1002,11 @@ export function registerHandlers({ bot, store, config }: Deps): void {
       return;
     }
     if (auth.activeGame.status !== 'drawn') {
-      await safeAnswerCallback(ctx, 'Сначала должна пройти жеребьёвка.', true);
+      await safeAnswerCallback(
+        ctx,
+        `В игре «${auth.activeGame.title}» жеребьёвка ещё не проведена.`,
+        true,
+      );
       return;
     }
     const santa = await store.getSantaForRecipient(auth.me.id);
@@ -800,27 +1016,91 @@ export function registerHandlers({ bot, store, config }: Deps): void {
     }
 
     await safeAnswerCallback(ctx);
+    await store.setActiveGame(auth.telegramId, explicitGameId);
     await store.setSessionState(auth.telegramId, {
       type: 'msg_to_santa',
-      gameId: auth.activeGame.id,
+      gameId: explicitGameId,
     });
-    await ctx.reply(
-      `🎅 Напиши сообщение своему Тайному Санте <i>(${escapeHtml(auth.activeGame.title)})</i> — я перешлю его без раскрытия (Санта увидит только, что это от его подопечного):`,
-      {
+
+    const prompt = `🎅 Напиши сообщение своему Тайному Санте <i>(${escapeHtml(auth.activeGame.title)})</i> — я перешлю его без раскрытия (Санта увидит только, что это от его подопечного):`;
+    if (replaceMessage) {
+      await safeEditOrSend(ctx, prompt, buildCancelKeyboard('menu:home'));
+    } else {
+      await ctx.reply(prompt, {
         parse_mode: 'HTML',
         reply_markup: buildCancelKeyboard('menu:home'),
-      },
-    );
+      });
+    }
   }
 
-  bot.callbackQuery('chat:to_recipient', (ctx) => startChatToRecipient(ctx));
+  bot.callbackQuery('chat:to_recipient', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+    if (pGames.length === 1) {
+      await startChatToRecipient(ctx, pGames[0].game.id, false);
+      return;
+    }
+
+    await safeAnswerCallback(ctx);
+    const items = await Promise.all(
+      pGames.map(async ({ game, me }) => {
+        if (game.status !== 'drawn' || !me.recipientId) {
+          return { game, labelSuffix: '(⏳ ждёт жеребьёвки)' };
+        }
+        const rec = await store.getParticipantById(me.recipientId);
+        return {
+          game,
+          labelSuffix: rec ? `(🎯 ${rec.displayName})` : undefined,
+        };
+      }),
+    );
+
+    await safeEditOrSend(
+      ctx,
+      '✉️ <b>Для какой комнаты написать твоему подопечному?</b>',
+      buildActionGamePickerKeyboard(items, 'chat:to_recipient:g:'),
+    );
+  });
+
+  bot.callbackQuery(/^chat:to_recipient:g:(\d+)$/, (ctx) =>
+    startChatToRecipient(ctx, Number(ctx.match[1]), true),
+  );
   bot.callbackQuery(/^chat:to_recipient:(\d+)$/, (ctx) =>
-    startChatToRecipient(ctx, Number(ctx.match[1])),
+    startChatToRecipient(ctx, Number(ctx.match[1]), false),
   );
 
-  bot.callbackQuery('chat:to_santa', (ctx) => startChatToSanta(ctx));
+  bot.callbackQuery('chat:to_santa', async (ctx) => {
+    const telegramId = getTelegramId(ctx);
+    if (!telegramId) return;
+    const pGames = await getParticipantGames(telegramId);
+    if (pGames.length === 0) return;
+    if (pGames.length === 1) {
+      await startChatToSanta(ctx, pGames[0].game.id, false);
+      return;
+    }
+
+    await safeAnswerCallback(ctx);
+    await safeEditOrSend(
+      ctx,
+      '🎅 <b>Для какой комнаты написать твоему Тайному Санте?</b>',
+      buildActionGamePickerKeyboard(
+        pGames.map(({ game }) => ({
+          game,
+          labelSuffix:
+            game.status === 'drawn' ? '(🎉)' : '(⏳ ждёт жеребьёвки)',
+        })),
+        'chat:to_santa:g:',
+      ),
+    );
+  });
+
+  bot.callbackQuery(/^chat:to_santa:g:(\d+)$/, (ctx) =>
+    startChatToSanta(ctx, Number(ctx.match[1]), true),
+  );
   bot.callbackQuery(/^chat:to_santa:(\d+)$/, (ctx) =>
-    startChatToSanta(ctx, Number(ctx.match[1])),
+    startChatToSanta(ctx, Number(ctx.match[1]), false),
   );
 
   // --- Admin Panel ---
